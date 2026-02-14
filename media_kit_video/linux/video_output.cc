@@ -96,6 +96,10 @@ static void video_output_dispose(GObject* object) {
       eglDestroyContext(self->egl_display, self->egl_context);
       self->egl_context = EGL_NO_CONTEXT;
     }
+    if (self->egl_surface != EGL_NO_SURFACE) {
+      eglDestroySurface(self->egl_display, self->egl_surface);
+      self->egl_surface = EGL_NO_SURFACE;
+    }
     if (self->owns_egl_display && self->egl_display != EGL_NO_DISPLAY) {
       eglTerminate(self->egl_display);
       self->egl_display = EGL_NO_DISPLAY;
@@ -254,13 +258,32 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
             EGL_CONTEXT_CLIENT_VERSION, 2,
             EGL_NONE,
         };
-        
-        self->egl_context = eglCreateContext(self->egl_display, config, 
+        self->egl_context = eglCreateContext(self->egl_display, config,
                                              EGL_NO_CONTEXT, context_attribs);
-        
+
         if (self->egl_context != EGL_NO_CONTEXT) {
-          // Make our isolated context current for initialization (surfaceless)
-          if (eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, self->egl_context)) {
+          // Use a tiny pbuffer surface for broader EGL compatibility on GTK4 drivers.
+          EGLint pbuffer_attribs[] = {
+              EGL_WIDTH,
+              1,
+              EGL_HEIGHT,
+              1,
+              EGL_NONE,
+          };
+          self->egl_surface = eglCreatePbufferSurface(
+              self->egl_display, config, pbuffer_attribs);
+          if (self->egl_surface == EGL_NO_SURFACE) {
+            g_printerr(
+                "media_kit: VideoOutput: Failed to create pbuffer surface. Error: 0x%x\n",
+                eglGetError());
+          }
+
+          // Make isolated context current for initialization.
+          EGLSurface current_surface =
+              self->egl_surface != EGL_NO_SURFACE ? self->egl_surface
+                                                  : EGL_NO_SURFACE;
+          if (eglMakeCurrent(self->egl_display, current_surface, current_surface,
+                             self->egl_context)) {
             // Create texture with our isolated context
             self->texture_gl = texture_gl_new(self);
             
@@ -301,12 +324,18 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                 mpv_render_context_set_update_callback(
                     self->render_context,
                     [](void* data) {
-                      VideoOutput* self = (VideoOutput*)data;
-                      if (self->destroyed) {
-                        return;
-                      }
-                      fl_texture_registrar_mark_texture_frame_available(
-                          self->texture_registrar, FL_TEXTURE(self->texture_gl));
+                      g_idle_add(
+                          [](gpointer data) -> gboolean {
+                            VideoOutput* self = (VideoOutput*)data;
+                            if (self->destroyed || self->texture_gl == NULL) {
+                              return FALSE;
+                            }
+                            fl_texture_registrar_mark_texture_frame_available(
+                                self->texture_registrar,
+                                FL_TEXTURE(self->texture_gl));
+                            return FALSE;
+                          },
+                          data);
                     },
                     self);
                 hardware_acceleration_supported = TRUE;
