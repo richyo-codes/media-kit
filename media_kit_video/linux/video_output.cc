@@ -52,6 +52,7 @@ struct _VideoOutput {
   gpointer texture_update_callback_context;
   FlTextureRegistrar* texture_registrar;
   gboolean destroyed;
+  gboolean owns_egl_display;
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -95,6 +96,11 @@ static void video_output_dispose(GObject* object) {
       eglDestroyContext(self->egl_display, self->egl_context);
       self->egl_context = EGL_NO_CONTEXT;
     }
+    if (self->owns_egl_display && self->egl_display != EGL_NO_DISPLAY) {
+      eglTerminate(self->egl_display);
+      self->egl_display = EGL_NO_DISPLAY;
+      self->owns_egl_display = FALSE;
+    }
     
     g_object_unref(self->texture_gl);
   }
@@ -134,6 +140,7 @@ static void video_output_init(VideoOutput* self) {
   self->texture_update_callback_context = NULL;
   self->texture_registrar = NULL;
   self->destroyed = FALSE;
+  self->owns_egl_display = FALSE;
   g_mutex_init(&self->mutex);
 }
 
@@ -165,8 +172,32 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
     EGLSurface flutter_draw_surface = eglGetCurrentSurface(EGL_DRAW);
     EGLSurface flutter_read_surface = eglGetCurrentSurface(EGL_READ);
     
-    if (flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT) {
+    bool has_flutter_egl =
+        flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT;
+    if (has_flutter_egl) {
       self->egl_display = flutter_display;
+    }
+#if defined(FLUTTER_LINUX_GTK4)
+    else {
+      self->egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+      if (self->egl_display != EGL_NO_DISPLAY) {
+        EGLint major = 0;
+        EGLint minor = 0;
+        if (eglInitialize(self->egl_display, &major, &minor)) {
+          self->owns_egl_display = TRUE;
+          g_print(
+              "media_kit: VideoOutput: Fallback EGL display initialized (%d.%d).\n",
+              major, minor);
+        } else {
+          g_printerr(
+              "media_kit: VideoOutput: Failed fallback EGL initialize. Error: 0x%x\n",
+              eglGetError());
+          self->egl_display = EGL_NO_DISPLAY;
+        }
+      }
+    }
+#endif
+    if (self->egl_display != EGL_NO_DISPLAY) {
       
       // Bind OpenGL ES API (Flutter uses OpenGL ES on Linux)
       eglBindAPI(EGL_OPENGL_ES_API);
@@ -175,7 +206,9 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       EGLConfig config = NULL;
       EGLint config_id = 0;
       
-      if (eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID, &config_id)) {
+      if (has_flutter_egl &&
+          eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
+                          &config_id)) {
         g_print("media_kit: VideoOutput: Flutter's EGL config ID: %d\n", config_id);
         
         // Get Flutter's exact config
@@ -189,7 +222,29 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
           config = NULL;
         }
       } else {
-        g_printerr("media_kit: VideoOutput: Failed to query Flutter's EGL config ID.\n");
+        EGLint num_configs = 0;
+        EGLint config_attribs[] = {
+            EGL_SURFACE_TYPE,
+            EGL_PBUFFER_BIT,
+            EGL_RENDERABLE_TYPE,
+            EGL_OPENGL_ES2_BIT,
+            EGL_RED_SIZE,
+            8,
+            EGL_GREEN_SIZE,
+            8,
+            EGL_BLUE_SIZE,
+            8,
+            EGL_ALPHA_SIZE,
+            8,
+            EGL_NONE,
+        };
+        if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
+                            &num_configs) &&
+            num_configs > 0) {
+          g_print("media_kit: VideoOutput: Using fallback EGL config.\n");
+        } else {
+          g_printerr("media_kit: VideoOutput: Failed to choose fallback EGL config.\n");
+        }
       }
       
       if (config != NULL) {        
@@ -263,8 +318,14 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
               g_printerr("media_kit: VideoOutput: Failed to register texture.\n");
             }
             
-            // Restore Flutter's context
-            eglMakeCurrent(flutter_display, flutter_draw_surface, flutter_read_surface, flutter_context);
+            // Restore Flutter's context if available.
+            if (has_flutter_egl) {
+              eglMakeCurrent(flutter_display, flutter_draw_surface,
+                             flutter_read_surface, flutter_context);
+            } else {
+              eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                             EGL_NO_CONTEXT);
+            }
           } else {
             g_printerr("media_kit: VideoOutput: Failed to make isolated EGL context current. Error: 0x%x\n", eglGetError());
           }
@@ -275,7 +336,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
         g_printerr("media_kit: VideoOutput: Could not obtain Flutter's EGL config.\n");
       }
     } else {
-      g_printerr("media_kit: VideoOutput: EGL display or context is invalid.\n");
+      g_printerr("media_kit: VideoOutput: EGL display unavailable.\n");
     }
   }
 #ifdef MPV_RENDER_API_TYPE_SW
