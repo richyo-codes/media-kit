@@ -146,12 +146,19 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       EGLContext flutter_context = eglGetCurrentContext();
       EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
       EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
-      
       EGLDisplay egl_display = video_output_get_egl_display(video_output);
       EGLContext egl_context = video_output_get_egl_context(video_output);
-      
+      EGLSurface egl_surface = video_output_get_egl_surface(video_output);
+
       // Switch to mpv's isolated context to create/resize mpv's texture and FBO
-      eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
+      EGLSurface draw_read_surface =
+          egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
+      if (!eglMakeCurrent(egl_display, draw_read_surface, draw_read_surface,
+                          egl_context)) {
+        g_printerr("media_kit: TextureGL: Failed to make mpv EGL context current for resize. Error: 0x%x\n",
+                   eglGetError());
+        return FALSE;
+      }
       
       // Free previous resources in mpv's context
       if (!first_frame) {
@@ -226,13 +233,20 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     EGLContext flutter_context = eglGetCurrentContext();
     EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
     EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
-    
     EGLDisplay egl_display = video_output_get_egl_display(video_output);
     EGLContext egl_context = video_output_get_egl_context(video_output);
+    EGLSurface egl_surface = video_output_get_egl_surface(video_output);
     mpv_render_context* render_context = video_output_get_render_context(video_output);
-    
+
     // Switch to mpv's isolated context for rendering
-    eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
+    EGLSurface draw_read_surface =
+        egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
+    if (!eglMakeCurrent(egl_display, draw_read_surface, draw_read_surface,
+                        egl_context)) {
+      g_printerr("media_kit: TextureGL: Failed to make mpv EGL context current for render. Error: 0x%x\n",
+                 eglGetError());
+      return FALSE;
+    }
     
     // Bind mpv's FBO
     glBindFramebuffer(GL_FRAMEBUFFER, self->fbo);
