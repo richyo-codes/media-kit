@@ -12,6 +12,15 @@
 
 #include <gtk/gtk.h>
 
+// Fallback when Flutter toolchain does not export FLUTTER_LINUX_GTK3/GTK4.
+#if !defined(FLUTTER_LINUX_GTK4) && !defined(FLUTTER_LINUX_GTK3)
+#if GTK_MAJOR_VERSION >= 4
+#define FLUTTER_LINUX_GTK4 1
+#else
+#define FLUTTER_LINUX_GTK3 1
+#endif
+#endif
+
 #include "include/media_kit_video/utils.h"
 #include "include/media_kit_video/video_output_manager.h"
 
@@ -135,13 +144,35 @@ static void media_kit_video_plugin_handle_method_call(
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
 
   } else if (g_strcmp0(method, "Utils.EnterNativeFullscreen") == 0) {
-    utils_enter_native_fullscreen(
-        gtk_widget_get_toplevel(GTK_WIDGET(self->view)));
+#if defined(FLUTTER_LINUX_GTK4)
+    GtkRoot* root = gtk_widget_get_root(GTK_WIDGET(self->view));
+    if (root != nullptr && GTK_IS_WINDOW(root)) {
+      utils_enter_native_fullscreen(GTK_WIDGET(root));
+    }
+#elif defined(FLUTTER_LINUX_GTK3)
+    GtkWidget* top_level = gtk_widget_get_toplevel(GTK_WIDGET(self->view));
+    if (top_level != nullptr && GTK_IS_WINDOW(top_level)) {
+      utils_enter_native_fullscreen(top_level);
+    }
+#else
+#error "Unknown GTK version"
+#endif
     FlValue* result = fl_value_new_null();
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (g_strcmp0(method, "Utils.ExitNativeFullscreen") == 0) {
-    utils_exit_native_fullscreen(
-        gtk_widget_get_toplevel(GTK_WIDGET(self->view)));
+#if defined(FLUTTER_LINUX_GTK4)
+    GtkRoot* root = gtk_widget_get_root(GTK_WIDGET(self->view));
+    if (root != nullptr && GTK_IS_WINDOW(root)) {
+      utils_exit_native_fullscreen(GTK_WIDGET(root));
+    }
+#elif defined(FLUTTER_LINUX_GTK3)
+    GtkWidget* top_level = gtk_widget_get_toplevel(GTK_WIDGET(self->view));
+    if (top_level != nullptr && GTK_IS_WINDOW(top_level)) {
+      utils_exit_native_fullscreen(top_level);
+    }
+#else
+#error "Unknown GTK version"
+#endif
     FlValue* result = fl_value_new_null();
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else {

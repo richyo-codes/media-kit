@@ -12,8 +12,27 @@
 
 #include <epoxy/egl.h>
 #include <epoxy/glx.h>
+
+// Fallback when Flutter toolchain does not export FLUTTER_LINUX_GTK3/GTK4.
+#if !defined(FLUTTER_LINUX_GTK4) && !defined(FLUTTER_LINUX_GTK3)
+#if GTK_MAJOR_VERSION >= 4
+#define FLUTTER_LINUX_GTK4 1
+#else
+#define FLUTTER_LINUX_GTK3 1
+#endif
+#endif
+
+#if __has_include(<gdk/wayland/gdkwayland.h>)
+#include <gdk/wayland/gdkwayland.h>
+#elif __has_include(<gdk/gdkwayland.h>)
 #include <gdk/gdkwayland.h>
+#endif
+
+#if __has_include(<gdk/x11/gdkx.h>)
+#include <gdk/x11/gdkx.h>
+#elif __has_include(<gdk/gdkx.h>)
 #include <gdk/gdkx.h>
+#endif
 
 struct _VideoOutput {
   GObject parent_instance;
@@ -209,13 +228,19 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
               
               // VAAPI acceleration requires passing X11/Wayland display
               GdkDisplay* display = gdk_display_get_default();
+#if defined(GDK_WINDOWING_WAYLAND)
               if (GDK_IS_WAYLAND_DISPLAY(display)) {
                 params[2].type = MPV_RENDER_PARAM_WL_DISPLAY;
                 params[2].data = gdk_wayland_display_get_wl_display(display);
-              } else if (GDK_IS_X11_DISPLAY(display)) {
+              } else
+#endif
+#if defined(GDK_WINDOWING_X11) && !defined(FLUTTER_LINUX_GTK4)
+              if (GDK_IS_X11_DISPLAY(display)) {
                 params[2].type = MPV_RENDER_PARAM_X11_DISPLAY;
                 params[2].data = gdk_x11_display_get_xdisplay(display);
               }
+#endif
+              {}
               
               if (mpv_render_context_create(&self->render_context, self->handle, params) == 0) {
                 mpv_render_context_set_update_callback(
@@ -271,7 +296,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
         mpv_render_context_set_update_callback(
             self->render_context,
             [](void* data) {
-              gdk_threads_add_idle(
+              g_idle_add(
                   [](gpointer data) -> gboolean {
                     VideoOutput* self = (VideoOutput*)data;
                     if (self->destroyed) {
