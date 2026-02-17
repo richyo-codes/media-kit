@@ -53,6 +53,7 @@ struct _VideoOutput {
   FlTextureRegistrar* texture_registrar;
   gboolean destroyed;
   gboolean owns_egl_display;
+  gboolean owns_egl_surface;
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -96,10 +97,11 @@ static void video_output_dispose(GObject* object) {
       eglDestroyContext(self->egl_display, self->egl_context);
       self->egl_context = EGL_NO_CONTEXT;
     }
-    if (self->egl_surface != EGL_NO_SURFACE) {
+    if (self->owns_egl_surface && self->egl_surface != EGL_NO_SURFACE) {
       eglDestroySurface(self->egl_display, self->egl_surface);
-      self->egl_surface = EGL_NO_SURFACE;
     }
+    self->egl_surface = EGL_NO_SURFACE;
+    self->owns_egl_surface = FALSE;
     if (self->owns_egl_display && self->egl_display != EGL_NO_DISPLAY) {
       eglTerminate(self->egl_display);
       self->egl_display = EGL_NO_DISPLAY;
@@ -145,6 +147,7 @@ static void video_output_init(VideoOutput* self) {
   self->texture_registrar = NULL;
   self->destroyed = FALSE;
   self->owns_egl_display = FALSE;
+  self->owns_egl_surface = FALSE;
   g_mutex_init(&self->mutex);
 }
 
@@ -328,9 +331,12 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
           self->egl_surface = eglCreatePbufferSurface(
               self->egl_display, config, pbuffer_attribs);
           if (self->egl_surface == EGL_NO_SURFACE) {
+            self->owns_egl_surface = FALSE;
             g_printerr(
                 "media_kit: VideoOutput: Failed to create pbuffer surface. Error: 0x%x\n",
                 eglGetError());
+          } else {
+            self->owns_egl_surface = TRUE;
           }
 
           // Make isolated context current for initialization.
@@ -483,8 +489,11 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
     self->egl_context = EGL_NO_CONTEXT;
   }
   if (self->egl_surface != EGL_NO_SURFACE && self->egl_display != EGL_NO_DISPLAY) {
-    eglDestroySurface(self->egl_display, self->egl_surface);
+    if (self->owns_egl_surface) {
+      eglDestroySurface(self->egl_display, self->egl_surface);
+    }
     self->egl_surface = EGL_NO_SURFACE;
+    self->owns_egl_surface = FALSE;
   }
   if (self->owns_egl_display && self->egl_display != EGL_NO_DISPLAY) {
     eglTerminate(self->egl_display);
@@ -539,25 +548,49 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   };
   self->egl_surface =
       eglCreatePbufferSurface(self->egl_display, config, pbuffer_attribs);
-  if (self->egl_surface == EGL_NO_SURFACE) {
+  if (self->egl_surface != EGL_NO_SURFACE) {
+    self->owns_egl_surface = TRUE;
+    if (!eglMakeCurrent(self->egl_display, self->egl_surface, self->egl_surface,
+                        self->egl_context)) {
+      g_printerr(
+          "media_kit: VideoOutput: Rebind failed, eglMakeCurrent error: 0x%x\n",
+          eglGetError());
+      eglDestroySurface(self->egl_display, self->egl_surface);
+      self->egl_surface = EGL_NO_SURFACE;
+      self->owns_egl_surface = FALSE;
+      eglDestroyContext(self->egl_display, self->egl_context);
+      self->egl_context = EGL_NO_CONTEXT;
+      return FALSE;
+    }
+  } else {
+    self->owns_egl_surface = FALSE;
+    const EGLint pbuffer_error = eglGetError();
     g_printerr(
-        "media_kit: VideoOutput: Rebind failed, eglCreatePbufferSurface error: 0x%x\n",
-        eglGetError());
-    eglDestroyContext(self->egl_display, self->egl_context);
-    self->egl_context = EGL_NO_CONTEXT;
-    return FALSE;
-  }
+        "media_kit: VideoOutput: Rebind pbuffer unavailable (0x%x), trying fallbacks.\n",
+        pbuffer_error);
 
-  if (!eglMakeCurrent(self->egl_display, self->egl_surface, self->egl_surface,
-                      self->egl_context)) {
-    g_printerr(
-        "media_kit: VideoOutput: Rebind failed, eglMakeCurrent error: 0x%x\n",
-        eglGetError());
-    eglDestroySurface(self->egl_display, self->egl_surface);
-    self->egl_surface = EGL_NO_SURFACE;
-    eglDestroyContext(self->egl_display, self->egl_context);
-    self->egl_context = EGL_NO_CONTEXT;
-    return FALSE;
+    // Prefer surfaceless current context if supported by EGL implementation.
+    if (eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       self->egl_context)) {
+      g_print(
+          "media_kit: VideoOutput: Rebind using surfaceless EGL context fallback.\n");
+      self->egl_surface = EGL_NO_SURFACE;
+    } else if (flutter_draw_surface != EGL_NO_SURFACE &&
+               flutter_read_surface != EGL_NO_SURFACE &&
+               eglMakeCurrent(self->egl_display, flutter_draw_surface,
+                              flutter_read_surface, self->egl_context)) {
+      // Last resort: borrow Flutter's own draw surface for mpv context.
+      self->egl_surface = flutter_draw_surface;
+      g_print(
+          "media_kit: VideoOutput: Rebind using Flutter EGL surface fallback.\n");
+    } else {
+      g_printerr(
+          "media_kit: VideoOutput: Rebind failed; no usable EGL surface fallback. Error: 0x%x\n",
+          eglGetError());
+      eglDestroyContext(self->egl_display, self->egl_context);
+      self->egl_context = EGL_NO_CONTEXT;
+      return FALSE;
+    }
   }
 
   if (!video_output_create_mpv_render_context(self)) {
@@ -565,8 +598,11 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
         "media_kit: VideoOutput: Rebind failed, mpv_render_context_create failed.\n");
     eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    EGL_NO_CONTEXT);
-    eglDestroySurface(self->egl_display, self->egl_surface);
+    if (self->owns_egl_surface && self->egl_surface != EGL_NO_SURFACE) {
+      eglDestroySurface(self->egl_display, self->egl_surface);
+    }
     self->egl_surface = EGL_NO_SURFACE;
+    self->owns_egl_surface = FALSE;
     eglDestroyContext(self->egl_display, self->egl_context);
     self->egl_context = EGL_NO_CONTEXT;
     eglMakeCurrent(flutter_display, flutter_draw_surface, flutter_read_surface,
