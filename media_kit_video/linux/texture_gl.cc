@@ -163,6 +163,12 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
       EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
 #if defined(FLUTTER_LINUX_GTK4)
+      if (flutter_display == EGL_NO_DISPLAY ||
+          flutter_context == EGL_NO_CONTEXT) {
+        g_printerr(
+            "media_kit: TextureGL: Flutter EGL context unavailable; deferring frame init.\n");
+        return FALSE;
+      }
       if (flutter_display != EGL_NO_DISPLAY &&
           (video_output_is_using_fallback_egl(video_output) ||
            video_output_get_render_context(video_output) == NULL ||
@@ -180,10 +186,7 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       EGLSurface egl_surface = video_output_get_egl_surface(video_output);
       gboolean can_use_direct_shared_texture = FALSE;
 #if defined(FLUTTER_LINUX_GTK4)
-      can_use_direct_shared_texture =
-          flutter_display != EGL_NO_DISPLAY &&
-          flutter_context != EGL_NO_CONTEXT &&
-          egl_display == flutter_display;
+      can_use_direct_shared_texture = TRUE;
 #endif
 
       // Switch to mpv's isolated context to create/resize mpv's texture and FBO
@@ -284,6 +287,12 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
         glBindTexture(GL_TEXTURE_2D, 0);
         clear_gl_errors("populate.egl_image_bridge");
       }
+#if defined(FLUTTER_LINUX_GTK4)
+      if (!self->use_direct_shared_texture) {
+        g_printerr(
+            "media_kit: TextureGL: Unexpected EGLImage bridge fallback in GTK4 path.\n");
+      }
+#endif
       
       self->current_width = required_width;
       self->current_height = required_height;
