@@ -37,12 +37,23 @@ static void init_egl_image_extensions() {
   }
 }
 
+static void clear_gl_errors(const char* stage) {
+  GLenum err = GL_NO_ERROR;
+  gboolean had_error = FALSE;
+  while ((err = glGetError()) != GL_NO_ERROR) {
+    had_error = TRUE;
+    g_printerr("media_kit: TextureGL: GL error 0x%x at %s\n", err, stage);
+  }
+  (void)had_error;
+}
+
 struct _TextureGL {
   FlTextureGL parent_instance;
   guint32 name;              // Flutter's texture name
   guint32 fbo;               // mpv's FBO
   guint32 mpv_texture;       // mpv's texture
   EGLImageKHR egl_image;     // EGLImage for sharing between contexts
+  gboolean use_direct_shared_texture;
   guint32 current_width;
   guint32 current_height;
   VideoOutput* video_output;
@@ -55,6 +66,7 @@ static void texture_gl_init(TextureGL* self) {
   self->fbo = 0;
   self->mpv_texture = 0;
   self->egl_image = EGL_NO_IMAGE_KHR;
+  self->use_direct_shared_texture = FALSE;
   self->current_width = 1;
   self->current_height = 1;
   self->video_output = NULL;
@@ -70,8 +82,9 @@ static void texture_gl_dispose(GObject* object) {
   EGLSurface current_draw = eglGetCurrentSurface(EGL_DRAW);
   EGLSurface current_read = eglGetCurrentSurface(EGL_READ);
   
-  // Clean up Flutter's texture (in Flutter's context)
-  if (self->name != 0) {
+  // Clean up Flutter's texture (in Flutter's context).
+  // If name points to mpv_texture in direct shared mode, delete once in mpv context.
+  if (self->name != 0 && self->name != self->mpv_texture) {
     glDeleteTextures(1, &self->name);
     self->name = 0;
   }
@@ -107,6 +120,7 @@ static void texture_gl_dispose(GObject* object) {
   
   self->current_width = 1;
   self->current_height = 1;
+  self->use_direct_shared_texture = FALSE;
   self->video_output = NULL;
   G_OBJECT_CLASS(texture_gl_parent_class)->dispose(object);
 }
@@ -129,8 +143,10 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
                                      guint32* width,
                                      guint32* height,
                                      GError** error) {
+  (void)error;
   TextureGL* self = TEXTURE_GL(texture);
   VideoOutput* video_output = self->video_output;
+  clear_gl_errors("populate.begin");
   
   gint32 required_width = (guint32)video_output_get_width(video_output);
   gint32 required_height = (guint32)video_output_get_height(video_output);
@@ -146,9 +162,29 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       EGLContext flutter_context = eglGetCurrentContext();
       EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
       EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
+#if defined(FLUTTER_LINUX_GTK4)
+      if (flutter_display != EGL_NO_DISPLAY &&
+          (video_output_is_using_fallback_egl(video_output) ||
+           video_output_get_render_context(video_output) == NULL ||
+           video_output_get_egl_context(video_output) == EGL_NO_CONTEXT ||
+           video_output_get_egl_display(video_output) != flutter_display)) {
+        if (!video_output_rebind_to_flutter_current_context(video_output)) {
+          g_printerr(
+              "media_kit: TextureGL: Failed to rebind VideoOutput to Flutter EGL context.\n");
+          return FALSE;
+        }
+      }
+#endif
       EGLDisplay egl_display = video_output_get_egl_display(video_output);
       EGLContext egl_context = video_output_get_egl_context(video_output);
       EGLSurface egl_surface = video_output_get_egl_surface(video_output);
+      gboolean can_use_direct_shared_texture = FALSE;
+#if defined(FLUTTER_LINUX_GTK4)
+      can_use_direct_shared_texture =
+          flutter_display != EGL_NO_DISPLAY &&
+          flutter_context != EGL_NO_CONTEXT &&
+          egl_display == flutter_display;
+#endif
 
       // Switch to mpv's isolated context to create/resize mpv's texture and FBO
       EGLSurface draw_read_surface =
@@ -164,8 +200,10 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       if (!first_frame) {
         glDeleteTextures(1, &self->mpv_texture);
         glDeleteFramebuffers(1, &self->fbo);
+        self->name = 0;
         if (self->egl_image != EGL_NO_IMAGE_KHR) {
           eglDestroyImageKHR(egl_display, self->egl_image);
+          self->egl_image = EGL_NO_IMAGE_KHR;
         }
       }
       
@@ -186,38 +224,66 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                              GL_TEXTURE_2D, self->mpv_texture, 0);
       
-      // Create EGLImage from mpv's texture
-      EGLint egl_image_attribs[] = { EGL_NONE };
-      self->egl_image = eglCreateImageKHR(
-          egl_display,
-          egl_context,
-          EGL_GL_TEXTURE_2D_KHR,
-          (EGLClientBuffer)(guintptr)self->mpv_texture,
-          egl_image_attribs);
+      if (!can_use_direct_shared_texture) {
+        // Create EGLImage from mpv's texture for cross-context bridging.
+        EGLint egl_image_attribs[] = { EGL_NONE };
+        self->egl_image = eglCreateImageKHR(
+            egl_display,
+            egl_context,
+            EGL_GL_TEXTURE_2D_KHR,
+            (EGLClientBuffer)(guintptr)self->mpv_texture,
+            egl_image_attribs);
+        if (self->egl_image == EGL_NO_IMAGE_KHR) {
+          g_printerr(
+              "media_kit: TextureGL: eglCreateImageKHR failed. Error: 0x%x\n",
+              eglGetError());
+        }
+      } else {
+        self->egl_image = EGL_NO_IMAGE_KHR;
+      }
       
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
       glBindTexture(GL_TEXTURE_2D, 0);
       
       // Flush to ensure mpv's texture is ready
       glFlush();
-      
-      // Switch back to Flutter's context to create/update Flutter's texture
-      eglMakeCurrent(flutter_display, flutter_draw, flutter_read, flutter_context);
-      
-      // Free previous Flutter texture
-      if (!first_frame && self->name != 0) {
-        glDeleteTextures(1, &self->name);
+      if (can_use_direct_shared_texture) {
+        self->use_direct_shared_texture = TRUE;
+        self->name = self->mpv_texture;
+        g_print("media_kit: TextureGL: Using direct shared texture path (GTK4).\n");
+      } else {
+        self->use_direct_shared_texture = FALSE;
+        // Switch back to Flutter's context to create/update Flutter's texture.
+        if (!eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
+                            flutter_context)) {
+          g_printerr(
+              "media_kit: TextureGL: Failed to restore Flutter EGL context for bridge. Error: 0x%x\n",
+              eglGetError());
+          return FALSE;
+        }
+
+        // Free previous Flutter texture.
+        if (!first_frame && self->name != 0 && self->name != self->mpv_texture) {
+          glDeleteTextures(1, &self->name);
+        }
+
+        // Create Flutter's texture from EGLImage.
+        glGenTextures(1, &self->name);
+        glBindTexture(GL_TEXTURE_2D, self->name);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (glEGLImageTargetTexture2DOES != NULL &&
+            self->egl_image != EGL_NO_IMAGE_KHR) {
+          glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, self->egl_image);
+        } else {
+          g_printerr(
+              "media_kit: TextureGL: EGLImage bridge extension unavailable.\n");
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        clear_gl_errors("populate.egl_image_bridge");
       }
-      
-      // Create Flutter's texture from EGLImage
-      glGenTextures(1, &self->name);
-      glBindTexture(GL_TEXTURE_2D, self->name);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, self->egl_image);
-      glBindTexture(GL_TEXTURE_2D, 0);
       
       self->current_width = required_width;
       self->current_height = required_height;
@@ -267,8 +333,15 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     // Flush to ensure rendering is complete
     glFlush();
     
-    // Restore Flutter's context
-    eglMakeCurrent(flutter_display, flutter_draw, flutter_read, flutter_context);
+    // Restore Flutter's context.
+    if (!eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
+                        flutter_context)) {
+      g_printerr(
+          "media_kit: TextureGL: Failed to restore Flutter EGL context after render. Error: 0x%x\n",
+          eglGetError());
+      return FALSE;
+    }
+    clear_gl_errors("populate.after_restore_flutter_context");
   }
   
   *target = GL_TEXTURE_2D;
@@ -282,10 +355,12 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     glBindTexture(GL_TEXTURE_2D, self->name);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glBindTexture(GL_TEXTURE_2D, 0);
+    clear_gl_errors("populate.dummy_texture");
     *name = self->name;
     *width = 1;
     *height = 1;
   }
+  clear_gl_errors("populate.end");
   
   return TRUE;
 }
