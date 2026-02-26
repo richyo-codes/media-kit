@@ -162,6 +162,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       EGLContext flutter_context = eglGetCurrentContext();
       EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
       EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
+      gboolean has_flutter_context =
+          flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT;
 #if defined(FLUTTER_LINUX_GTK4)
       if (flutter_display == EGL_NO_DISPLAY ||
           flutter_context == EGL_NO_CONTEXT) {
@@ -287,6 +289,15 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
         glBindTexture(GL_TEXTURE_2D, 0);
         clear_gl_errors("populate.egl_image_bridge");
       }
+      // Ensure Flutter context is restored after init/resize.
+      if (has_flutter_context &&
+          !eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
+                          flutter_context)) {
+        g_printerr(
+            "media_kit: TextureGL: Failed to restore Flutter EGL context after init/resize. Error: 0x%x\n",
+            eglGetError());
+        return FALSE;
+      }
 #if defined(FLUTTER_LINUX_GTK4)
       if (!self->use_direct_shared_texture) {
         g_printerr(
@@ -299,8 +310,6 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       
       // Notify Flutter about dimension change
       video_output_notify_texture_update(video_output);
-      
-      // Flutter's context is already current, so we're ready to render
     }
     
     // Save Flutter's current context
