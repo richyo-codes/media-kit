@@ -54,6 +54,7 @@ struct _VideoOutput {
   gboolean destroyed;
   gboolean owns_egl_display;
   gboolean owns_egl_surface;
+  EGLContext bound_flutter_context;
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -102,6 +103,7 @@ static void video_output_dispose(GObject* object) {
     }
     self->egl_surface = EGL_NO_SURFACE;
     self->owns_egl_surface = FALSE;
+    self->bound_flutter_context = EGL_NO_CONTEXT;
     if (self->owns_egl_display && self->egl_display != EGL_NO_DISPLAY) {
       eglTerminate(self->egl_display);
       self->egl_display = EGL_NO_DISPLAY;
@@ -148,6 +150,7 @@ static void video_output_init(VideoOutput* self) {
   self->destroyed = FALSE;
   self->owns_egl_display = FALSE;
   self->owns_egl_surface = FALSE;
+  self->bound_flutter_context = EGL_NO_CONTEXT;
   g_mutex_init(&self->mutex);
 }
 
@@ -475,7 +478,8 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   }
 
   if (self->egl_display == flutter_display && self->egl_context != EGL_NO_CONTEXT &&
-      self->render_context != NULL) {
+      self->render_context != NULL &&
+      self->bound_flutter_context == flutter_context) {
     return TRUE;
   }
 
@@ -499,6 +503,7 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
     eglTerminate(self->egl_display);
     self->owns_egl_display = FALSE;
   }
+  self->bound_flutter_context = EGL_NO_CONTEXT;
 
   self->egl_display = flutter_display;
 
@@ -536,6 +541,7 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   if (self->egl_context == EGL_NO_CONTEXT) {
     g_printerr("media_kit: VideoOutput: Rebind failed, eglCreateContext error: 0x%x\n",
                eglGetError());
+    self->bound_flutter_context = EGL_NO_CONTEXT;
     return FALSE;
   }
 
@@ -560,6 +566,7 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
       self->owns_egl_surface = FALSE;
       eglDestroyContext(self->egl_display, self->egl_context);
       self->egl_context = EGL_NO_CONTEXT;
+      self->bound_flutter_context = EGL_NO_CONTEXT;
       return FALSE;
     }
   } else {
@@ -589,6 +596,7 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
           eglGetError());
       eglDestroyContext(self->egl_display, self->egl_context);
       self->egl_context = EGL_NO_CONTEXT;
+      self->bound_flutter_context = EGL_NO_CONTEXT;
       return FALSE;
     }
   }
@@ -605,11 +613,13 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
     self->owns_egl_surface = FALSE;
     eglDestroyContext(self->egl_display, self->egl_context);
     self->egl_context = EGL_NO_CONTEXT;
+    self->bound_flutter_context = EGL_NO_CONTEXT;
     eglMakeCurrent(flutter_display, flutter_draw_surface, flutter_read_surface,
                    flutter_context);
     return FALSE;
   }
 
+  self->bound_flutter_context = flutter_context;
   eglMakeCurrent(flutter_display, flutter_draw_surface, flutter_read_surface,
                  flutter_context);
   g_print("media_kit: VideoOutput: Rebound to Flutter EGL display/context.\n");
