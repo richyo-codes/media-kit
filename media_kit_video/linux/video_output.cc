@@ -265,40 +265,48 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       // Bind OpenGL ES API (Flutter uses OpenGL ES on Linux)
       eglBindAPI(EGL_OPENGL_ES_API);
       
-      // Query Flutter's EGL config and reuse it for compatibility
+      // Query Flutter's EGL config and reuse it for compatibility.
+      // If unavailable/invalid, fallback to a generic pbuffer-capable config.
       EGLConfig config = NULL;
       EGLint config_id = 0;
-      
-      if (has_flutter_egl &&
-          eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
-                          &config_id)) {
-        g_print("media_kit: VideoOutput: Flutter's EGL config ID: %d\n", config_id);
-        
-        // Get Flutter's exact config
-        EGLint num_configs = 0;
-        EGLint config_attribs[] = { EGL_CONFIG_ID, config_id, EGL_NONE };
-        
-        if (eglChooseConfig(self->egl_display, config_attribs, &config, 1, &num_configs) && num_configs > 0) {
-          g_print("media_kit: VideoOutput: Using Flutter's EGL config.\n");
+
+      if (has_flutter_egl) {
+        if (eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
+                            &config_id)) {
+          g_print("media_kit: VideoOutput: Flutter's EGL config ID: %d\n",
+                  config_id);
+          if (config_id > 0) {
+            EGLint num_configs = 0;
+            EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
+            if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
+                                &num_configs) &&
+                num_configs > 0) {
+              g_print("media_kit: VideoOutput: Using Flutter's EGL config.\n");
+            } else {
+              g_printerr(
+                  "media_kit: VideoOutput: Failed to get Flutter's EGL config by ID. Error: 0x%x\n",
+                  eglGetError());
+              config = NULL;
+            }
+          } else {
+            g_printerr(
+                "media_kit: VideoOutput: Flutter EGL config ID is invalid (%d), falling back.\n",
+                config_id);
+          }
         } else {
-          g_printerr("media_kit: VideoOutput: Failed to get Flutter's EGL config by ID.\n");
-          config = NULL;
+          g_printerr(
+              "media_kit: VideoOutput: Failed to query Flutter EGL config ID. Error: 0x%x\n",
+              eglGetError());
         }
-      } else {
+      }
+
+      if (config == NULL) {
         EGLint num_configs = 0;
         EGLint config_attribs[] = {
-            EGL_SURFACE_TYPE,
-            EGL_PBUFFER_BIT,
-            EGL_RENDERABLE_TYPE,
-            EGL_OPENGL_ES2_BIT,
-            EGL_RED_SIZE,
-            8,
-            EGL_GREEN_SIZE,
-            8,
-            EGL_BLUE_SIZE,
-            8,
-            EGL_ALPHA_SIZE,
-            8,
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,   EGL_RENDERABLE_TYPE,
+            EGL_OPENGL_ES2_BIT, EGL_RED_SIZE,    8,
+            EGL_GREEN_SIZE,     8,               EGL_BLUE_SIZE,
+            8,                  EGL_ALPHA_SIZE,  8,
             EGL_NONE,
         };
         if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
@@ -306,7 +314,9 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
             num_configs > 0) {
           g_print("media_kit: VideoOutput: Using fallback EGL config.\n");
         } else {
-          g_printerr("media_kit: VideoOutput: Failed to choose fallback EGL config.\n");
+          g_printerr(
+              "media_kit: VideoOutput: Failed to choose fallback EGL config. Error: 0x%x\n",
+              eglGetError());
         }
       }
       
