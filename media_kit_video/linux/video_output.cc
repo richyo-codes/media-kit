@@ -525,20 +525,50 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
 
   EGLConfig config = NULL;
   EGLint config_id = 0;
-  if (!eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
-                       &config_id)) {
-    g_printerr("media_kit: VideoOutput: Rebind failed, could not query Flutter EGL config.\n");
-    return FALSE;
+  if (eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
+                      &config_id)) {
+    if (config_id > 0) {
+      EGLint num_configs = 0;
+      EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
+      if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
+                          &num_configs) &&
+          num_configs > 0) {
+        g_print("media_kit: VideoOutput: Rebind using Flutter EGL config.\n");
+      } else {
+        g_printerr(
+            "media_kit: VideoOutput: Rebind failed to resolve Flutter EGL config by ID. Error: 0x%x\n",
+            eglGetError());
+      }
+    } else {
+      g_printerr(
+          "media_kit: VideoOutput: Rebind got invalid Flutter EGL config ID (%d), falling back.\n",
+          config_id);
+    }
+  } else {
+    g_printerr(
+        "media_kit: VideoOutput: Rebind failed to query Flutter EGL config ID. Error: 0x%x\n",
+        eglGetError());
   }
 
-  EGLint num_configs = 0;
-  EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
-  if (!(eglChooseConfig(self->egl_display, config_attribs, &config, 1,
+  if (config == NULL) {
+    EGLint num_configs = 0;
+    EGLint config_attribs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,   EGL_RENDERABLE_TYPE,
+        EGL_OPENGL_ES2_BIT, EGL_RED_SIZE,    8,
+        EGL_GREEN_SIZE,     8,               EGL_BLUE_SIZE,
+        8,                  EGL_ALPHA_SIZE,  8,
+        EGL_NONE,
+    };
+    if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
                         &num_configs) &&
-        num_configs > 0)) {
-    g_printerr(
-        "media_kit: VideoOutput: Rebind failed, could not choose Flutter EGL config.\n");
-    return FALSE;
+        num_configs > 0) {
+      g_print("media_kit: VideoOutput: Rebind using fallback EGL config.\n");
+    } else {
+      g_printerr(
+          "media_kit: VideoOutput: Rebind failed to choose fallback EGL config. Error: 0x%x\n",
+          eglGetError());
+      return FALSE;
+    }
   }
 
   EGLint context_attribs[] = {
