@@ -47,6 +47,21 @@ static void clear_gl_errors(const char* stage) {
   (void)had_error;
 }
 
+#if defined(FLUTTER_LINUX_GTK4)
+static gboolean media_kit_gtk4_allow_direct_shared_texture() {
+#if defined(FLUTTER_LINUX_GTK4)
+  const gchar* value = g_getenv("MEDIA_KIT_GTK4_DIRECT_SHARED_TEXTURE");
+  if (value == NULL) {
+    return FALSE;
+  }
+  return g_strcmp0(value, "1") == 0 ||
+         g_ascii_strcasecmp(value, "true") == 0;
+#else
+  return FALSE;
+#endif
+}
+#endif
+
 struct _TextureGL {
   FlTextureGL parent_instance;
   guint32 name;              // Flutter's texture name
@@ -171,16 +186,10 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
             "media_kit: TextureGL: Flutter EGL context unavailable; deferring frame init.\n");
         return FALSE;
       }
-      if (flutter_display != EGL_NO_DISPLAY &&
-          (video_output_is_using_fallback_egl(video_output) ||
-           video_output_get_render_context(video_output) == NULL ||
-           video_output_get_egl_context(video_output) == EGL_NO_CONTEXT ||
-           video_output_get_egl_display(video_output) != flutter_display)) {
-        if (!video_output_rebind_to_flutter_current_context(video_output)) {
-          g_printerr(
-              "media_kit: TextureGL: Failed to rebind VideoOutput to Flutter EGL context.\n");
-          return FALSE;
-        }
+      if (!video_output_rebind_to_flutter_current_context(video_output)) {
+        g_printerr(
+            "media_kit: TextureGL: Failed to rebind VideoOutput to Flutter EGL context.\n");
+        return FALSE;
       }
 #endif
       EGLDisplay egl_display = video_output_get_egl_display(video_output);
@@ -188,7 +197,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       EGLSurface egl_surface = video_output_get_egl_surface(video_output);
       gboolean can_use_direct_shared_texture = FALSE;
 #if defined(FLUTTER_LINUX_GTK4)
-      can_use_direct_shared_texture = TRUE;
+      can_use_direct_shared_texture =
+          media_kit_gtk4_allow_direct_shared_texture();
 #endif
 
       // Switch to mpv's isolated context to create/resize mpv's texture and FBO
@@ -300,8 +310,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       }
 #if defined(FLUTTER_LINUX_GTK4)
       if (!self->use_direct_shared_texture) {
-        g_printerr(
-            "media_kit: TextureGL: Unexpected EGLImage bridge fallback in GTK4 path.\n");
+        g_print(
+            "media_kit: TextureGL: Using EGLImage bridge path (GTK4).\n");
       }
 #endif
       
@@ -321,6 +331,24 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     EGLContext egl_context = video_output_get_egl_context(video_output);
     EGLSurface egl_surface = video_output_get_egl_surface(video_output);
     mpv_render_context* render_context = video_output_get_render_context(video_output);
+
+#if defined(FLUTTER_LINUX_GTK4)
+    if (flutter_display == EGL_NO_DISPLAY ||
+        flutter_context == EGL_NO_CONTEXT) {
+      g_printerr(
+          "media_kit: TextureGL: Flutter EGL context unavailable before render.\n");
+      return FALSE;
+    }
+    if (!video_output_rebind_to_flutter_current_context(video_output)) {
+      g_printerr(
+          "media_kit: TextureGL: Failed to rebind VideoOutput before render.\n");
+      return FALSE;
+    }
+    egl_display = video_output_get_egl_display(video_output);
+    egl_context = video_output_get_egl_context(video_output);
+    egl_surface = video_output_get_egl_surface(video_output);
+    render_context = video_output_get_render_context(video_output);
+#endif
 
     // Switch to mpv's isolated context for rendering
     EGLSurface draw_read_surface =
