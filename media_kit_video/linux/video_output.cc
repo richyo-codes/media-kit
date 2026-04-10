@@ -59,6 +59,61 @@ struct _VideoOutput {
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
 
+static gboolean video_output_resolve_flutter_egl_config(EGLDisplay display,
+                                                        EGLContext context,
+                                                        EGLSurface draw_surface,
+                                                        EGLSurface read_surface,
+                                                        EGLConfig* out_config) {
+  g_return_val_if_fail(out_config != NULL, FALSE);
+
+  *out_config = NULL;
+
+  if (display == EGL_NO_DISPLAY) {
+    return FALSE;
+  }
+
+  EGLint config_id = 0;
+  const char* config_source = NULL;
+
+  if (context != EGL_NO_CONTEXT &&
+      eglQueryContext(display, context, EGL_CONFIG_ID, &config_id) &&
+      config_id > 0) {
+    config_source = "context";
+  } else if (draw_surface != EGL_NO_SURFACE &&
+             eglQuerySurface(display, draw_surface, EGL_CONFIG_ID,
+                             &config_id) &&
+             config_id > 0) {
+    config_source = "draw surface";
+  } else if (read_surface != EGL_NO_SURFACE &&
+             eglQuerySurface(display, read_surface, EGL_CONFIG_ID,
+                             &config_id) &&
+             config_id > 0) {
+    config_source = "read surface";
+  }
+
+  if (config_source == NULL) {
+    g_printerr(
+        "media_kit: VideoOutput: Could not resolve Flutter EGL config ID from current context or surfaces.\n");
+    return FALSE;
+  }
+
+  g_print("media_kit: VideoOutput: Flutter's EGL config ID: %d (%s)\n",
+          config_id, config_source);
+
+  EGLint num_configs = 0;
+  EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
+  if (eglChooseConfig(display, config_attribs, out_config, 1, &num_configs) &&
+      num_configs > 0) {
+    return TRUE;
+  }
+
+  g_printerr(
+      "media_kit: VideoOutput: Failed to resolve Flutter EGL config by ID. Error: 0x%x\n",
+      eglGetError());
+  *out_config = NULL;
+  return FALSE;
+}
+
 static void video_output_dispose(GObject* object) {
   VideoOutput* self = VIDEO_OUTPUT(object);
   self->destroyed = TRUE;
@@ -268,36 +323,12 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       // Query Flutter's EGL config and reuse it for compatibility.
       // If unavailable/invalid, fallback to a generic pbuffer-capable config.
       EGLConfig config = NULL;
-      EGLint config_id = 0;
 
-      if (has_flutter_egl) {
-        if (eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
-                            &config_id)) {
-          g_print("media_kit: VideoOutput: Flutter's EGL config ID: %d\n",
-                  config_id);
-          if (config_id > 0) {
-            EGLint num_configs = 0;
-            EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
-            if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
-                                &num_configs) &&
-                num_configs > 0) {
-              g_print("media_kit: VideoOutput: Using Flutter's EGL config.\n");
-            } else {
-              g_printerr(
-                  "media_kit: VideoOutput: Failed to get Flutter's EGL config by ID. Error: 0x%x\n",
-                  eglGetError());
-              config = NULL;
-            }
-          } else {
-            g_printerr(
-                "media_kit: VideoOutput: Flutter EGL config ID is invalid (%d), falling back.\n",
-                config_id);
-          }
-        } else {
-          g_printerr(
-              "media_kit: VideoOutput: Failed to query Flutter EGL config ID. Error: 0x%x\n",
-              eglGetError());
-        }
+      if (has_flutter_egl &&
+          video_output_resolve_flutter_egl_config(
+              self->egl_display, flutter_context, flutter_draw_surface,
+              flutter_read_surface, &config)) {
+        g_print("media_kit: VideoOutput: Using Flutter's EGL config.\n");
       }
 
       if (config == NULL) {
@@ -524,30 +555,12 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   }
 
   EGLConfig config = NULL;
-  EGLint config_id = 0;
-  if (eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
-                      &config_id)) {
-    if (config_id > 0) {
-      EGLint num_configs = 0;
-      EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
-      if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
-                          &num_configs) &&
-          num_configs > 0) {
-        g_print("media_kit: VideoOutput: Rebind using Flutter EGL config.\n");
-      } else {
-        g_printerr(
-            "media_kit: VideoOutput: Rebind failed to resolve Flutter EGL config by ID. Error: 0x%x\n",
-            eglGetError());
-      }
-    } else {
-      g_printerr(
-          "media_kit: VideoOutput: Rebind got invalid Flutter EGL config ID (%d), falling back.\n",
-          config_id);
-    }
-  } else {
-    g_printerr(
-        "media_kit: VideoOutput: Rebind failed to query Flutter EGL config ID. Error: 0x%x\n",
-        eglGetError());
+  if (video_output_resolve_flutter_egl_config(self->egl_display,
+                                              flutter_context,
+                                              flutter_draw_surface,
+                                              flutter_read_surface,
+                                              &config)) {
+    g_print("media_kit: VideoOutput: Rebind using Flutter EGL config.\n");
   }
 
   if (config == NULL) {
