@@ -161,6 +161,21 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   
   gint32 required_width = (guint32)video_output_get_width(video_output);
   gint32 required_height = (guint32)video_output_get_height(video_output);
+
+#if defined(FLUTTER_LINUX_GTK4)
+  if (video_output_get_render_context(video_output) == NULL) {
+    EGLDisplay flutter_display = eglGetCurrentDisplay();
+    EGLContext flutter_context = eglGetCurrentContext();
+
+    if (flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT) {
+      if (!video_output_rebind_to_flutter_current_context(video_output)) {
+        g_printerr(
+            "media_kit: TextureGL: Failed to establish GTK4 render context before first frame.\n");
+        return FALSE;
+      }
+    }
+  }
+#endif
   
   if (required_width > 0 && required_height > 0) {
     gboolean first_frame = self->name == 0 || self->fbo == 0 || self->mpv_texture == 0;
