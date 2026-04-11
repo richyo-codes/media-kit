@@ -67,6 +67,10 @@ struct _TextureGL {
   gboolean use_direct_shared_texture;
   guint32 current_width;
   guint32 current_height;
+  EGLDisplay last_flutter_display;
+  EGLContext last_flutter_context;
+  EGLSurface last_flutter_draw_surface;
+  EGLSurface last_flutter_read_surface;
   VideoOutput* video_output;
 };
 
@@ -80,7 +84,33 @@ static void texture_gl_init(TextureGL* self) {
   self->use_direct_shared_texture = FALSE;
   self->current_width = 1;
   self->current_height = 1;
+  self->last_flutter_display = EGL_NO_DISPLAY;
+  self->last_flutter_context = EGL_NO_CONTEXT;
+  self->last_flutter_draw_surface = EGL_NO_SURFACE;
+  self->last_flutter_read_surface = EGL_NO_SURFACE;
   self->video_output = NULL;
+}
+
+static gboolean texture_gl_flutter_binding_changed(TextureGL* self,
+                                                   EGLDisplay display,
+                                                   EGLContext context,
+                                                   EGLSurface draw_surface,
+                                                   EGLSurface read_surface) {
+  return self->last_flutter_display != display ||
+         self->last_flutter_context != context ||
+         self->last_flutter_draw_surface != draw_surface ||
+         self->last_flutter_read_surface != read_surface;
+}
+
+static void texture_gl_record_flutter_binding(TextureGL* self,
+                                              EGLDisplay display,
+                                              EGLContext context,
+                                              EGLSurface draw_surface,
+                                              EGLSurface read_surface) {
+  self->last_flutter_display = display;
+  self->last_flutter_context = context;
+  self->last_flutter_draw_surface = draw_surface;
+  self->last_flutter_read_surface = read_surface;
 }
 
 static void texture_gl_dispose(GObject* object) {
@@ -132,6 +162,10 @@ static void texture_gl_dispose(GObject* object) {
   self->current_width = 1;
   self->current_height = 1;
   self->use_direct_shared_texture = FALSE;
+  self->last_flutter_display = EGL_NO_DISPLAY;
+  self->last_flutter_context = EGL_NO_CONTEXT;
+  self->last_flutter_draw_surface = EGL_NO_SURFACE;
+  self->last_flutter_read_surface = EGL_NO_SURFACE;
   self->video_output = NULL;
   G_OBJECT_CLASS(texture_gl_parent_class)->dispose(object);
 }
@@ -166,6 +200,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   if (video_output_get_render_context(video_output) == NULL) {
     EGLDisplay flutter_display = eglGetCurrentDisplay();
     EGLContext flutter_context = eglGetCurrentContext();
+    EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
 
     if (flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT) {
       if (!video_output_rebind_to_flutter_current_context(video_output)) {
@@ -173,6 +209,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
             "media_kit: TextureGL: Failed to establish GTK4 render context before first frame.\n");
         return FALSE;
       }
+      texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
+                                        flutter_draw, flutter_read);
     }
   }
 #endif
@@ -197,10 +235,17 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
             "media_kit: TextureGL: Flutter EGL context unavailable; deferring frame init.\n");
         return FALSE;
       }
-      if (!video_output_rebind_to_flutter_current_context(video_output)) {
-        g_printerr(
-            "media_kit: TextureGL: Failed to rebind VideoOutput to Flutter EGL context.\n");
-        return FALSE;
+      if (video_output_get_render_context(video_output) == NULL ||
+          texture_gl_flutter_binding_changed(self, flutter_display,
+                                            flutter_context, flutter_draw,
+                                            flutter_read)) {
+        if (!video_output_rebind_to_flutter_current_context(video_output)) {
+          g_printerr(
+              "media_kit: TextureGL: Failed to rebind VideoOutput to Flutter EGL context.\n");
+          return FALSE;
+        }
+        texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
+                                          flutter_draw, flutter_read);
       }
 #endif
       EGLDisplay egl_display = video_output_get_egl_display(video_output);
@@ -217,8 +262,9 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
           egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
       if (!eglMakeCurrent(egl_display, draw_read_surface, draw_read_surface,
                           egl_context)) {
-        g_printerr("media_kit: TextureGL: Failed to make mpv EGL context current for resize. Error: 0x%x\n",
-                   eglGetError());
+        g_printerr(
+            "media_kit: TextureGL: Failed to make mpv EGL context current for resize. Error: 0x%x\n",
+            eglGetError());
         return FALSE;
       }
       
@@ -350,10 +396,17 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
           "media_kit: TextureGL: Flutter EGL context unavailable before render.\n");
       return FALSE;
     }
-    if (!video_output_rebind_to_flutter_current_context(video_output)) {
-      g_printerr(
-          "media_kit: TextureGL: Failed to rebind VideoOutput before render.\n");
-      return FALSE;
+    if (video_output_get_render_context(video_output) == NULL ||
+        texture_gl_flutter_binding_changed(self, flutter_display,
+                                          flutter_context, flutter_draw,
+                                          flutter_read)) {
+      if (!video_output_rebind_to_flutter_current_context(video_output)) {
+        g_printerr(
+            "media_kit: TextureGL: Failed to rebind VideoOutput before render.\n");
+        return FALSE;
+      }
+      texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
+                                        flutter_draw, flutter_read);
     }
     egl_display = video_output_get_egl_display(video_output);
     egl_context = video_output_get_egl_context(video_output);
