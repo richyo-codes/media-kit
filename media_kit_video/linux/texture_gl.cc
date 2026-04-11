@@ -47,7 +47,6 @@ static void clear_gl_errors(const char* stage) {
   (void)had_error;
 }
 
-#if defined(FLUTTER_LINUX_GTK4)
 static gboolean media_kit_gtk4_allow_direct_shared_texture() {
 #if defined(FLUTTER_LINUX_GTK4)
   const gchar* value = g_getenv("MEDIA_KIT_GTK4_DIRECT_SHARED_TEXTURE");
@@ -60,7 +59,6 @@ static gboolean media_kit_gtk4_allow_direct_shared_texture() {
   return FALSE;
 #endif
 }
-#endif
 
 struct _TextureGL {
   FlTextureGL parent_instance;
