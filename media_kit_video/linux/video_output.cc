@@ -316,13 +316,13 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
     }
 #endif
     if (self->egl_display != EGL_NO_DISPLAY) {
+      
       // Bind OpenGL ES API (Flutter uses OpenGL ES on Linux)
       eglBindAPI(EGL_OPENGL_ES_API);
-
+      
       // Query Flutter's EGL config and reuse it for compatibility.
       // If unavailable/invalid, fallback to a generic pbuffer-capable config.
       EGLConfig config = NULL;
-      gboolean should_defer_gtk4_init = FALSE;
 
       if (has_flutter_egl &&
           video_output_resolve_flutter_egl_config(
@@ -331,123 +331,95 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
         g_print("media_kit: VideoOutput: Using Flutter's EGL config.\n");
       }
 
-#if defined(FLUTTER_LINUX_GTK4)
       if (config == NULL) {
-        should_defer_gtk4_init = TRUE;
-      }
-#endif
-
-      if (should_defer_gtk4_init) {
-        self->texture_gl = texture_gl_new(self);
-        if (fl_texture_registrar_register_texture(
-                texture_registrar, FL_TEXTURE(self->texture_gl))) {
-          hardware_acceleration_supported = TRUE;
-          g_print(
-              "media_kit: VideoOutput: Deferring GTK4 EGL initialization until Flutter's EGL config becomes available.\n");
+        EGLint num_configs = 0;
+        EGLint config_attribs[] = {
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,   EGL_RENDERABLE_TYPE,
+            EGL_OPENGL_ES2_BIT, EGL_RED_SIZE,    8,
+            EGL_GREEN_SIZE,     8,               EGL_BLUE_SIZE,
+            8,                  EGL_ALPHA_SIZE,  8,
+            EGL_NONE,
+        };
+        if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
+                            &num_configs) &&
+            num_configs > 0) {
+          g_print("media_kit: VideoOutput: Using fallback EGL config.\n");
         } else {
           g_printerr(
-              "media_kit: VideoOutput: Failed to register deferred GTK4 texture.\n");
-          g_clear_object(&self->texture_gl);
+              "media_kit: VideoOutput: Failed to choose fallback EGL config. Error: 0x%x\n",
+              eglGetError());
+        }
+      }
+      
+      if (config != NULL) {        
+        // Create an isolated EGL context (NOT shared with Flutter)
+        // For GTK4, sharing with Flutter's context improves texture interop.
+        EGLint context_attribs[] = {
+            EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL_NONE,
+        };
+        EGLContext share_context =
+            has_flutter_egl ? flutter_context : EGL_NO_CONTEXT;
+        self->egl_context = eglCreateContext(self->egl_display, config,
+                                             share_context, context_attribs);
+
+        if (self->egl_context != EGL_NO_CONTEXT) {
+          // Use a tiny pbuffer surface for broader EGL compatibility on GTK4 drivers.
+          EGLint pbuffer_attribs[] = {
+              EGL_WIDTH,
+              1,
+              EGL_HEIGHT,
+              1,
+              EGL_NONE,
+          };
+          self->egl_surface = eglCreatePbufferSurface(
+              self->egl_display, config, pbuffer_attribs);
+          if (self->egl_surface == EGL_NO_SURFACE) {
+            self->owns_egl_surface = FALSE;
+            g_printerr(
+                "media_kit: VideoOutput: Failed to create pbuffer surface. Error: 0x%x\n",
+                eglGetError());
+          } else {
+            self->owns_egl_surface = TRUE;
+          }
+
+          // Make isolated context current for initialization.
+          EGLSurface current_surface =
+              self->egl_surface != EGL_NO_SURFACE ? self->egl_surface
+                                                  : EGL_NO_SURFACE;
+          if (eglMakeCurrent(self->egl_display, current_surface, current_surface,
+                             self->egl_context)) {
+            // Create texture with our isolated context
+            self->texture_gl = texture_gl_new(self);
+            
+            if (fl_texture_registrar_register_texture(
+                    texture_registrar, FL_TEXTURE(self->texture_gl))) {
+              if (video_output_create_mpv_render_context(self)) {
+                hardware_acceleration_supported = TRUE;
+                g_print("media_kit: VideoOutput: H/W rendering with isolated EGL context.\n");
+              } else {
+                g_printerr("media_kit: VideoOutput: Failed to create mpv_render_context.\n");
+              }
+            } else {
+              g_printerr("media_kit: VideoOutput: Failed to register texture.\n");
+            }
+            
+            // Restore Flutter's context if available.
+            if (has_flutter_egl) {
+              eglMakeCurrent(flutter_display, flutter_draw_surface,
+                             flutter_read_surface, flutter_context);
+            } else {
+              eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                             EGL_NO_CONTEXT);
+            }
+          } else {
+            g_printerr("media_kit: VideoOutput: Failed to make isolated EGL context current. Error: 0x%x\n", eglGetError());
+          }
+        } else {
+          g_printerr("media_kit: VideoOutput: Failed to create isolated EGL context. Error: 0x%x\n", eglGetError());
         }
       } else {
-        if (config == NULL) {
-          EGLint num_configs = 0;
-          EGLint config_attribs[] = {
-              EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,   EGL_RENDERABLE_TYPE,
-              EGL_OPENGL_ES2_BIT, EGL_RED_SIZE,    8,
-              EGL_GREEN_SIZE,     8,               EGL_BLUE_SIZE,
-              8,                  EGL_ALPHA_SIZE,  8,
-              EGL_NONE,
-          };
-          if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
-                              &num_configs) &&
-              num_configs > 0) {
-            g_print("media_kit: VideoOutput: Using fallback EGL config.\n");
-          } else {
-            g_printerr(
-                "media_kit: VideoOutput: Failed to choose fallback EGL config. Error: 0x%x\n",
-                eglGetError());
-          }
-        }
-
-        if (config != NULL) {
-          // Create an isolated EGL context (NOT shared with Flutter)
-          // For GTK4, sharing with Flutter's context improves texture interop.
-          EGLint context_attribs[] = {
-              EGL_CONTEXT_CLIENT_VERSION, 2,
-              EGL_NONE,
-          };
-          EGLContext share_context =
-              has_flutter_egl ? flutter_context : EGL_NO_CONTEXT;
-          self->egl_context = eglCreateContext(self->egl_display, config,
-                                               share_context, context_attribs);
-
-          if (self->egl_context != EGL_NO_CONTEXT) {
-            // Use a tiny pbuffer surface for broader EGL compatibility on GTK4 drivers.
-            EGLint pbuffer_attribs[] = {
-                EGL_WIDTH,
-                1,
-                EGL_HEIGHT,
-                1,
-                EGL_NONE,
-            };
-            self->egl_surface = eglCreatePbufferSurface(
-                self->egl_display, config, pbuffer_attribs);
-            if (self->egl_surface == EGL_NO_SURFACE) {
-              self->owns_egl_surface = FALSE;
-              g_printerr(
-                  "media_kit: VideoOutput: Failed to create pbuffer surface. Error: 0x%x\n",
-                  eglGetError());
-            } else {
-              self->owns_egl_surface = TRUE;
-            }
-
-            // Make isolated context current for initialization.
-            EGLSurface current_surface =
-                self->egl_surface != EGL_NO_SURFACE ? self->egl_surface
-                                                    : EGL_NO_SURFACE;
-            if (eglMakeCurrent(self->egl_display, current_surface,
-                               current_surface, self->egl_context)) {
-              // Create texture with our isolated context
-              self->texture_gl = texture_gl_new(self);
-
-              if (fl_texture_registrar_register_texture(
-                      texture_registrar, FL_TEXTURE(self->texture_gl))) {
-                if (video_output_create_mpv_render_context(self)) {
-                  hardware_acceleration_supported = TRUE;
-                  g_print(
-                      "media_kit: VideoOutput: H/W rendering with isolated EGL context.\n");
-                } else {
-                  g_printerr(
-                      "media_kit: VideoOutput: Failed to create mpv_render_context.\n");
-                }
-              } else {
-                g_printerr(
-                    "media_kit: VideoOutput: Failed to register texture.\n");
-              }
-
-              // Restore Flutter's context if available.
-              if (has_flutter_egl) {
-                eglMakeCurrent(flutter_display, flutter_draw_surface,
-                               flutter_read_surface, flutter_context);
-              } else {
-                eglMakeCurrent(self->egl_display, EGL_NO_SURFACE,
-                               EGL_NO_SURFACE, EGL_NO_CONTEXT);
-              }
-            } else {
-              g_printerr(
-                  "media_kit: VideoOutput: Failed to make isolated EGL context current. Error: 0x%x\n",
-                  eglGetError());
-            }
-          } else {
-            g_printerr(
-                "media_kit: VideoOutput: Failed to create isolated EGL context. Error: 0x%x\n",
-                eglGetError());
-          }
-        } else {
-          g_printerr(
-              "media_kit: VideoOutput: Could not obtain Flutter's EGL config.\n");
-        }
+        g_printerr("media_kit: VideoOutput: Could not obtain Flutter's EGL config.\n");
       }
     } else {
       g_printerr("media_kit: VideoOutput: EGL display unavailable.\n");
