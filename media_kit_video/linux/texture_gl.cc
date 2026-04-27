@@ -27,14 +27,30 @@ static PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR = NULL;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = NULL;
 #endif
 
-static void init_egl_image_extensions() {
+static gboolean has_current_egl_context() {
+  return eglGetCurrentDisplay() != EGL_NO_DISPLAY &&
+         eglGetCurrentContext() != EGL_NO_CONTEXT;
+}
+
+static gboolean init_egl_image_extensions() {
   static gboolean initialized = FALSE;
-  if (!initialized) {
-    eglCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-    eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-    glEGLImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-    initialized = TRUE;
+  if (initialized) {
+    return TRUE;
   }
+
+  if (!has_current_egl_context()) {
+    return FALSE;
+  }
+
+  eglCreateImageKHR =
+      (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+  eglDestroyImageKHR =
+      (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+  glEGLImageTargetTexture2DOES =
+      (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
+          "glEGLImageTargetTexture2DOES");
+  initialized = TRUE;
+  return TRUE;
 }
 
 static void clear_gl_errors(const char* stage) {
@@ -176,7 +192,6 @@ static void texture_gl_class_init(TextureGLClass* klass) {
 }
 
 TextureGL* texture_gl_new(VideoOutput* video_output) {
-  init_egl_image_extensions();
   TextureGL* self = TEXTURE_GL(g_object_new(texture_gl_get_type(), NULL));
   self->video_output = video_output;
   return self;
@@ -191,8 +206,6 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   (void)error;
   TextureGL* self = TEXTURE_GL(texture);
   VideoOutput* video_output = self->video_output;
-  clear_gl_errors("populate.begin");
-  
   gint32 required_width = (guint32)video_output_get_width(video_output);
   gint32 required_height = (guint32)video_output_get_height(video_output);
 
@@ -209,11 +222,20 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
             "media_kit: TextureGL: Failed to establish GTK4 render context before first frame.\n");
         return FALSE;
       }
+      if (!init_egl_image_extensions()) {
+        g_printerr(
+            "media_kit: TextureGL: EGL extension pointers are unavailable before first frame.\n");
+        return FALSE;
+      }
       texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
                                         flutter_draw, flutter_read);
     }
   }
 #endif
+
+  if (has_current_egl_context()) {
+    clear_gl_errors("populate.begin");
+  }
   
   if (required_width > 0 && required_height > 0) {
     gboolean first_frame = self->name == 0 || self->fbo == 0 || self->mpv_texture == 0;
@@ -242,6 +264,11 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
         if (!video_output_rebind_to_flutter_current_context(video_output)) {
           g_printerr(
               "media_kit: TextureGL: Failed to rebind VideoOutput to Flutter EGL context.\n");
+          return FALSE;
+        }
+        if (!init_egl_image_extensions()) {
+          g_printerr(
+              "media_kit: TextureGL: EGL extension pointers are unavailable during init/resize.\n");
           return FALSE;
         }
         texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
@@ -403,6 +430,11 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       if (!video_output_rebind_to_flutter_current_context(video_output)) {
         g_printerr(
             "media_kit: TextureGL: Failed to rebind VideoOutput before render.\n");
+        return FALSE;
+      }
+      if (!init_egl_image_extensions()) {
+        g_printerr(
+            "media_kit: TextureGL: EGL extension pointers are unavailable before render.\n");
         return FALSE;
       }
       texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
