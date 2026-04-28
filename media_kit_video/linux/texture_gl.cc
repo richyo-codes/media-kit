@@ -67,10 +67,15 @@ static void clear_gl_errors(const char* stage) {
 static gboolean media_kit_gtk4_allow_direct_shared_texture() {
   const gchar* value = g_getenv("MEDIA_KIT_GTK4_DIRECT_SHARED_TEXTURE");
   if (value == NULL) {
+    return TRUE;
+  }
+  if (g_strcmp0(value, "0") == 0 ||
+      g_ascii_strcasecmp(value, "false") == 0 ||
+      g_ascii_strcasecmp(value, "no") == 0 ||
+      g_ascii_strcasecmp(value, "off") == 0) {
     return FALSE;
   }
-  return g_strcmp0(value, "1") == 0 ||
-         g_ascii_strcasecmp(value, "true") == 0;
+  return TRUE;
 }
 #endif
 
