@@ -32,27 +32,6 @@ static gboolean has_current_egl_context() {
          eglGetCurrentContext() != EGL_NO_CONTEXT;
 }
 
-static gboolean init_egl_image_extensions() {
-  static gboolean initialized = FALSE;
-  if (initialized) {
-    return TRUE;
-  }
-
-  if (!has_current_egl_context()) {
-    return FALSE;
-  }
-
-  eglCreateImageKHR =
-      (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-  eglDestroyImageKHR =
-      (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-  glEGLImageTargetTexture2DOES =
-      (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
-          "glEGLImageTargetTexture2DOES");
-  initialized = TRUE;
-  return TRUE;
-}
-
 static void clear_gl_errors(const char* stage) {
   GLenum err = GL_NO_ERROR;
   gboolean had_error = FALSE;
@@ -75,6 +54,29 @@ static gboolean media_kit_gtk4_allow_direct_shared_texture() {
       g_ascii_strcasecmp(value, "off") == 0) {
     return FALSE;
   }
+  return TRUE;
+}
+#endif
+
+#if defined(FLUTTER_LINUX_GTK4)
+static gboolean init_egl_image_extensions() {
+  static gboolean initialized = FALSE;
+  if (initialized) {
+    return TRUE;
+  }
+
+  if (!has_current_egl_context()) {
+    return FALSE;
+  }
+
+  eglCreateImageKHR =
+      (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+  eglDestroyImageKHR =
+      (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+  glEGLImageTargetTexture2DOES =
+      (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
+          "glEGLImageTargetTexture2DOES");
+  initialized = TRUE;
   return TRUE;
 }
 #endif
@@ -112,6 +114,7 @@ static void texture_gl_init(TextureGL* self) {
   self->video_output = NULL;
 }
 
+#if defined(FLUTTER_LINUX_GTK4)
 static gboolean texture_gl_flutter_binding_changed(TextureGL* self,
                                                    EGLDisplay display,
                                                    EGLContext context,
@@ -133,6 +136,7 @@ static void texture_gl_record_flutter_binding(TextureGL* self,
   self->last_flutter_draw_surface = draw_surface;
   self->last_flutter_read_surface = read_surface;
 }
+#endif
 
 static void texture_gl_dispose(GObject* object) {
   TextureGL* self = TEXTURE_GL(object);
