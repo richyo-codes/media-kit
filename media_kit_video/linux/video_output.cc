@@ -230,7 +230,7 @@ static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
     params[2].data = gdk_wayland_display_get_wl_display(display);
   } else
 #endif
-#if defined(GDK_WINDOWING_X11) && !defined(FLUTTER_LINUX_GTK4)
+#if defined(GDK_WINDOWING_X11)
   if (GDK_IS_X11_DISPLAY(display)) {
     params[2].type = MPV_RENDER_PARAM_X11_DISPLAY;
     params[2].data = gdk_x11_display_get_xdisplay(display);
