@@ -166,9 +166,13 @@ static void texture_gl_dispose(GObject* object) {
   if (video_output != NULL) {
     EGLDisplay egl_display = video_output_get_egl_display(video_output);
     EGLContext egl_context = video_output_get_egl_context(video_output);
+    EGLSurface egl_surface = video_output_get_egl_surface(video_output);
     
     if (egl_context != EGL_NO_CONTEXT) {
-      eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
+      EGLSurface draw_read_surface =
+          egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
+      eglMakeCurrent(egl_display, draw_read_surface, draw_read_surface,
+                     egl_context);
       
       if (self->mpv_texture != 0) {
         glDeleteTextures(1, &self->mpv_texture);

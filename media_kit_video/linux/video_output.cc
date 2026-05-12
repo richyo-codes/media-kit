@@ -137,7 +137,11 @@ static void video_output_dispose(GObject* object) {
     // Free mpv_render_context with our own isolated EGL context
     if (self->render_context != NULL) {
       if (self->egl_context != EGL_NO_CONTEXT) {
-        eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, self->egl_context);
+        EGLSurface current_surface =
+            self->egl_surface != EGL_NO_SURFACE ? self->egl_surface
+                                                : EGL_NO_SURFACE;
+        eglMakeCurrent(self->egl_display, current_surface, current_surface,
+                       self->egl_context);
       }
       mpv_render_context_free(self->render_context);
       self->render_context = NULL;
