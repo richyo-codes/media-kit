@@ -68,6 +68,15 @@ void video_output_manager_set_size(VideoOutputManager* self,
   }
 }
 
+void video_output_manager_mark_frame_available(VideoOutputManager* self,
+                                               gint64 handle) {
+  if (g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
+    VideoOutput* video_output = VIDEO_OUTPUT(
+        g_hash_table_lookup(self->video_outputs, GINT_TO_POINTER(handle)));
+    video_output_mark_frame_available(video_output, "plugin");
+  }
+}
+
 void video_output_manager_dispose(VideoOutputManager* self, gint64 handle) {
   if (g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
     g_hash_table_remove(self->video_outputs, GINT_TO_POINTER(handle));

@@ -92,6 +92,9 @@ void video_output_set_texture_update_callback(
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height);
 
 void video_output_mark_frame_available(VideoOutput* self, const char* reason);
+void video_output_schedule_direct_shared_frame_available(VideoOutput* self,
+                                                         const char* reason,
+                                                         guint delay_ms);
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 
