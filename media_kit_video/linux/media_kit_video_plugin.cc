@@ -57,6 +57,12 @@ static void media_kit_video_plugin_handle_method_call(
         fl_value_get_string(fl_value_lookup_string(configuration, "height"));
     const bool configuration_enable_hardware_acceleration = fl_value_get_bool(
         fl_value_lookup_string(configuration, "enableHardwareAcceleration"));
+    FlValue* configuration_linux_gtk4_texture_interop =
+        fl_value_lookup_string(configuration, "linuxGtk4TextureInterop");
+    const gchar* linux_gtk4_texture_interop =
+        configuration_linux_gtk4_texture_interop != NULL
+            ? fl_value_get_string(configuration_linux_gtk4_texture_interop)
+            : "null";
 
     if (g_strcmp0(configuration_width, "null") != 0) {
       configuration_value.width =
@@ -68,6 +74,12 @@ static void media_kit_video_plugin_handle_method_call(
     }
     configuration_value.enable_hardware_acceleration =
         configuration_enable_hardware_acceleration;
+    if (g_strcmp0(linux_gtk4_texture_interop, "eglImageBridge") == 0) {
+      configuration_value.gtk4_texture_interop = 1;
+    } else if (g_strcmp0(linux_gtk4_texture_interop,
+                         "directSharedTexture") == 0) {
+      configuration_value.gtk4_texture_interop = 2;
+    }
 
     typedef struct _VideoOutputTextureUpdateCallbackData {
       FlMethodChannel* channel;
@@ -132,6 +144,15 @@ static void media_kit_video_plugin_handle_method_call(
     }
     video_output_manager_set_size(self->video_output_manager, handle_value,
                                   width_value, height_value);
+    FlValue* result = fl_value_new_null();
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  } else if (g_strcmp0(method, "VideoOutputManager.MarkFrameAvailable") == 0) {
+    FlValue* arguments = fl_method_call_get_args(method_call);
+    FlValue* handle = fl_value_lookup_string(arguments, "handle");
+    gint64 handle_value =
+        g_ascii_strtoll(fl_value_get_string(handle), NULL, 10);
+    video_output_manager_mark_frame_available(self->video_output_manager,
+                                              handle_value);
     FlValue* result = fl_value_new_null();
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (g_strcmp0(method, "VideoOutputManager.Dispose") == 0) {
