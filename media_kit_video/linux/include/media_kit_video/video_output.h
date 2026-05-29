@@ -20,13 +20,16 @@ typedef struct _VideoOutputConfiguration {
   gint64 width;
   gint64 height;
   bool enable_hardware_acceleration;
+  gint gtk4_texture_interop;
 
   _VideoOutputConfiguration(gint64 width = NULL,
                             gint64 height = NULL,
-                            bool enable_hardware_acceleration = true)
+                            bool enable_hardware_acceleration = true,
+                            gint gtk4_texture_interop = 0)
       : width(width),
         height(height),
-        enable_hardware_acceleration(enable_hardware_acceleration) {}
+        enable_hardware_acceleration(enable_hardware_acceleration),
+        gtk4_texture_interop(gtk4_texture_interop) {}
 } VideoOutputConfiguration;
 
 // Callback invoked when the texture ID updates i.e. video dimensions changes.
@@ -88,6 +91,8 @@ void video_output_set_texture_update_callback(
  */
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height);
 
+void video_output_mark_frame_available(VideoOutput* self, const char* reason);
+
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 
 GdkGLContext* video_output_get_gdk_gl_context(VideoOutput* self);
@@ -101,6 +106,8 @@ EGLSurface video_output_get_egl_surface(VideoOutput* self);
 gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self);
 
 gboolean video_output_is_using_fallback_egl(VideoOutput* self);
+
+gint video_output_get_gtk4_texture_interop(VideoOutput* self);
 
 guint8* video_output_get_pixel_buffer(VideoOutput* self);
 
