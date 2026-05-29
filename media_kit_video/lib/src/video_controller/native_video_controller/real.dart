@@ -183,6 +183,8 @@ class NativeVideoController extends PlatformVideoController {
           'height': configuration.height.toString(),
           'enableHardwareAcceleration':
               configuration.enableHardwareAcceleration,
+          'linuxGtk4TextureInterop':
+              configuration.linuxGtk4TextureInterop?.name ?? 'null',
         },
       },
     );
