@@ -708,6 +708,15 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
   }
 }
 
+void video_output_mark_frame_available(VideoOutput* self, const char* reason) {
+  if (self->destroyed || self->texture_registrar == NULL ||
+      self->texture_gl == NULL) {
+    return;
+  }
+  fl_texture_registrar_mark_texture_frame_available(
+      self->texture_registrar, FL_TEXTURE(self->texture_gl));
+}
+
 mpv_render_context* video_output_get_render_context(VideoOutput* self) {
   return self->render_context;
 }
@@ -726,6 +735,10 @@ EGLSurface video_output_get_egl_surface(VideoOutput* self) {
 
 gboolean video_output_is_using_fallback_egl(VideoOutput* self) {
   return self->owns_egl_display;
+}
+
+gint video_output_get_gtk4_texture_interop(VideoOutput* self) {
+  return self->configuration.gtk4_texture_interop;
 }
 
 guint8* video_output_get_pixel_buffer(VideoOutput* self) {
