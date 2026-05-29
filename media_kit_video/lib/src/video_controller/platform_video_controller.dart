@@ -10,6 +10,15 @@ import 'package:media_kit/media_kit.dart';
 
 import 'package:media_kit_video/src/video_controller/video_controller.dart';
 
+/// GTK4 Linux texture interop selection.
+enum LinuxGtk4TextureInterop {
+  /// Preferred GTK4 shared texture path.
+  directSharedTexture,
+
+  /// EGLImage bridge fallback/debug path.
+  eglImageBridge,
+}
+
 /// {@template platform_video_controller}
 ///
 /// PlatformVideoController
@@ -121,6 +130,11 @@ class VideoControllerConfiguration {
   /// * [vo] != gpu : `false`
   final bool? androidAttachSurfaceAfterVideoParameters;
 
+  /// Selects the GTK4 Linux texture interop path.
+  ///
+  /// Default: `null`, which lets the native Linux backend choose.
+  final LinuxGtk4TextureInterop? linuxGtk4TextureInterop;
+
   /// {@macro video_controller_configuration}
   const VideoControllerConfiguration({
     this.vo,
@@ -130,6 +144,7 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.androidAttachSurfaceAfterVideoParameters,
+    this.linuxGtk4TextureInterop,
   });
 
   /// Returns a copy of this class with the given fields replaced by the new values.
@@ -141,6 +156,7 @@ class VideoControllerConfiguration {
     int? height,
     bool? enableHardwareAcceleration,
     bool? androidAttachSurfaceAfterVideoParameters,
+    LinuxGtk4TextureInterop? linuxGtk4TextureInterop,
   }) =>
       VideoControllerConfiguration(
         vo: vo ?? this.vo,
@@ -153,5 +169,7 @@ class VideoControllerConfiguration {
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,
+        linuxGtk4TextureInterop:
+            linuxGtk4TextureInterop ?? this.linuxGtk4TextureInterop,
       );
 }
