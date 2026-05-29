@@ -43,7 +43,17 @@ static void clear_gl_errors(const char* stage) {
 }
 
 #if defined(FLUTTER_LINUX_GTK4)
-static gboolean media_kit_gtk4_allow_direct_shared_texture() {
+static gboolean media_kit_gtk4_allow_direct_shared_texture(
+    VideoOutput* video_output) {
+  const gint configured_interop =
+      video_output_get_gtk4_texture_interop(video_output);
+  if (configured_interop == 1) {
+    return FALSE;
+  }
+  if (configured_interop == 2) {
+    return TRUE;
+  }
+
   const gchar* value = g_getenv("MEDIA_KIT_GTK4_DIRECT_SHARED_TEXTURE");
   if (value == NULL) {
     return TRUE;
@@ -294,7 +304,7 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       gboolean can_use_direct_shared_texture = FALSE;
 #if defined(FLUTTER_LINUX_GTK4)
       can_use_direct_shared_texture =
-          media_kit_gtk4_allow_direct_shared_texture();
+          media_kit_gtk4_allow_direct_shared_texture(video_output);
 #endif
 
       // Switch to mpv's isolated context to create/resize mpv's texture and FBO
