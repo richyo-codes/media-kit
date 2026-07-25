@@ -91,10 +91,19 @@ void video_output_set_texture_update_callback(
  */
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height);
 
+void video_output_lock_render_state(VideoOutput* self);
+void video_output_unlock_render_state(VideoOutput* self);
+
 void video_output_mark_frame_available(VideoOutput* self, const char* reason);
-void video_output_schedule_direct_shared_frame_available(VideoOutput* self,
-                                                         const char* reason,
-                                                         guint delay_ms);
+void video_output_schedule_frame_available(VideoOutput* self,
+                                           const char* reason,
+                                           guint delay_ms);
+
+#if defined(FLUTTER_LINUX_GTK4)
+// Schedules bounded retries that allow Flutter to mount and populate the
+// initial GTK4 external texture after its 1x1 bootstrap notification.
+void video_output_schedule_initial_frame_wakeups(VideoOutput* self);
+#endif
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 

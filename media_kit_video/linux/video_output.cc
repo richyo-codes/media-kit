@@ -43,6 +43,7 @@ struct _VideoOutput {
   guint8* pixel_buffer;
   TextureSW* texture_sw;
   GMutex mutex; /* Only used in S/W rendering. */
+  GRecMutex render_mutex;
   mpv_handle* handle;
   mpv_render_context* render_context;
   gint64 width;
@@ -58,6 +59,22 @@ struct _VideoOutput {
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
+
+namespace {
+
+class ScopedVideoOutputRenderLock {
+ public:
+  explicit ScopedVideoOutputRenderLock(VideoOutput* self) : self_(self) {
+    g_rec_mutex_lock(&self_->render_mutex);
+  }
+
+  ~ScopedVideoOutputRenderLock() { g_rec_mutex_unlock(&self_->render_mutex); }
+
+ private:
+  VideoOutput* self_;
+};
+
+}  // namespace
 
 static gboolean video_output_resolve_flutter_egl_config(EGLDisplay display,
                                                         EGLContext context,
@@ -108,6 +125,7 @@ static gboolean video_output_resolve_flutter_egl_config(EGLDisplay display,
 
 static void video_output_dispose(GObject* object) {
   VideoOutput* self = VIDEO_OUTPUT(object);
+  ScopedVideoOutputRenderLock lock(self);
   self->destroyed = TRUE;
   
   // Make sure that no more callbacks are invoked from mpv.
@@ -126,7 +144,7 @@ static void video_output_dispose(GObject* object) {
     EGLSurface flutter_draw_surface = eglGetCurrentSurface(EGL_DRAW);
     EGLSurface flutter_read_surface = eglGetCurrentSurface(EGL_READ);
     
-    // Free mpv_render_context with our own isolated EGL context
+    // Free mpv and its GL resources while the media context still exists.
     if (self->render_context != NULL) {
       if (self->egl_context != EGL_NO_CONTEXT) {
         EGLSurface current_surface =
@@ -137,11 +155,19 @@ static void video_output_dispose(GObject* object) {
       }
       mpv_render_context_free(self->render_context);
       self->render_context = NULL;
-      
-      // Restore Flutter's context
-      if (flutter_context != EGL_NO_CONTEXT) {
-        eglMakeCurrent(current_display, flutter_draw_surface, flutter_read_surface, flutter_context);
-      }
+    }
+
+    g_clear_object(&self->texture_gl);
+
+    // Restore Flutter's context, or unbind the media context before destroying
+    // it when disposal started without a current context.
+    if (current_display != EGL_NO_DISPLAY &&
+        flutter_context != EGL_NO_CONTEXT) {
+      eglMakeCurrent(current_display, flutter_draw_surface,
+                     flutter_read_surface, flutter_context);
+    } else if (self->egl_display != EGL_NO_DISPLAY) {
+      eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                     EGL_NO_CONTEXT);
     }
     
     // Clean up EGL resources
@@ -161,7 +187,6 @@ static void video_output_dispose(GObject* object) {
       self->owns_egl_display = FALSE;
     }
     
-    g_object_unref(self->texture_gl);
   }
   // S/W
   if (self->texture_sw) {
@@ -175,12 +200,19 @@ static void video_output_dispose(GObject* object) {
     }
   }
   
-  g_mutex_clear(&self->mutex);
   G_OBJECT_CLASS(video_output_parent_class)->dispose(object);
+}
+
+static void video_output_finalize(GObject* object) {
+  VideoOutput* self = VIDEO_OUTPUT(object);
+  g_rec_mutex_clear(&self->render_mutex);
+  g_mutex_clear(&self->mutex);
+  G_OBJECT_CLASS(video_output_parent_class)->finalize(object);
 }
 
 static void video_output_class_init(VideoOutputClass* klass) {
   G_OBJECT_CLASS(klass)->dispose = video_output_dispose;
+  G_OBJECT_CLASS(klass)->finalize = video_output_finalize;
 }
 
 static void video_output_init(VideoOutput* self) {
@@ -203,6 +235,7 @@ static void video_output_init(VideoOutput* self) {
   self->owns_egl_surface = FALSE;
   self->bound_flutter_context = EGL_NO_CONTEXT;
   g_mutex_init(&self->mutex);
+  g_rec_mutex_init(&self->render_mutex);
 }
 
 static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
@@ -248,9 +281,11 @@ static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
   mpv_render_context_set_update_callback(
       self->render_context,
       [](void* data) {
-        g_idle_add(
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
             [](gpointer data) -> gboolean {
               VideoOutput* self = (VideoOutput*)data;
+              ScopedVideoOutputRenderLock lock(self);
               if (self->destroyed || self->texture_gl == NULL) {
                 return FALSE;
               }
@@ -258,7 +293,7 @@ static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
                   self->texture_registrar, FL_TEXTURE(self->texture_gl));
               return FALSE;
             },
-            data);
+            g_object_ref(data), g_object_unref);
       },
       self);
   return TRUE;
@@ -414,9 +449,11 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
         mpv_render_context_set_update_callback(
             self->render_context,
             [](void* data) {
-              g_idle_add(
+              g_idle_add_full(
+                  G_PRIORITY_DEFAULT_IDLE,
                   [](gpointer data) -> gboolean {
                     VideoOutput* self = (VideoOutput*)data;
+                    ScopedVideoOutputRenderLock render_lock(self);
                     if (self->destroyed) {
                       return FALSE;
                     }
@@ -441,7 +478,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                     g_mutex_unlock(&self->mutex);
                     return FALSE;
                   },
-                  data);
+                  g_object_ref(data), g_object_unref);
             },
             self);
       }
@@ -471,6 +508,13 @@ void video_output_set_texture_update_callback(
     self->texture_update_callback(texture_id, self->width, self->height,
                                   self->texture_update_callback_context);
   }
+#if defined(FLUTTER_LINUX_GTK4)
+  // The initial mpv update can arrive before Flutter has mounted the Texture
+  // created by the callback above. Retry after the platform-channel delivery
+  // instead of waiting for populate_texture(), which cannot run until a mark
+  // succeeds.
+  video_output_schedule_initial_frame_wakeups(self);
+#endif
 }
 
 gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
@@ -478,6 +522,7 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   (void)self;
   return FALSE;
 #else
+  ScopedVideoOutputRenderLock lock(self);
   EGLDisplay flutter_display = eglGetCurrentDisplay();
   EGLContext flutter_context = eglGetCurrentContext();
   EGLSurface flutter_draw_surface = eglGetCurrentSurface(EGL_DRAW);
@@ -620,10 +665,7 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
 }
 
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
-  // Ideally, a mutex should be used here & |video_output_get_width| +
-  // |video_output_get_height|. However, that is throwing everything into a
-  // deadlock. Flutter itself seems to have some synchronization mechanism in
-  // rendering & platform channels AFAIK.
+  ScopedVideoOutputRenderLock lock(self);
 
   // H/W
   if (self->texture_gl) {
@@ -637,7 +679,16 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
   }
 }
 
+void video_output_lock_render_state(VideoOutput* self) {
+  g_rec_mutex_lock(&self->render_mutex);
+}
+
+void video_output_unlock_render_state(VideoOutput* self) {
+  g_rec_mutex_unlock(&self->render_mutex);
+}
+
 void video_output_mark_frame_available(VideoOutput* self, const char* reason) {
+  ScopedVideoOutputRenderLock lock(self);
   if (self->destroyed || self->texture_registrar == NULL ||
       self->texture_gl == NULL) {
     return;
@@ -647,17 +698,15 @@ void video_output_mark_frame_available(VideoOutput* self, const char* reason) {
       self->texture_registrar, FL_TEXTURE(self->texture_gl));
 }
 
-typedef struct _DirectSharedFrameAvailableData {
+typedef struct _FrameAvailableData {
   VideoOutput* self;
   char* reason;
-} DirectSharedFrameAvailableData;
+} FrameAvailableData;
 
-static gboolean video_output_schedule_direct_shared_frame_available_cb(
+static gboolean video_output_schedule_frame_available_cb(
     gpointer user_data) {
-  DirectSharedFrameAvailableData* data =
-      (DirectSharedFrameAvailableData*)user_data;
-  if (data->self != NULL && !data->self->destroyed &&
-      texture_gl_is_using_direct_shared_texture(data->self->texture_gl)) {
+  FrameAvailableData* data = (FrameAvailableData*)user_data;
+  if (data->self != NULL && !data->self->destroyed) {
     video_output_mark_frame_available(data->self, data->reason);
   }
   if (data->self != NULL) {
@@ -668,43 +717,58 @@ static gboolean video_output_schedule_direct_shared_frame_available_cb(
   return G_SOURCE_REMOVE;
 }
 
-void video_output_schedule_direct_shared_frame_available(VideoOutput* self,
-                                                         const char* reason,
-                                                         guint delay_ms) {
+void video_output_schedule_frame_available(VideoOutput* self,
+                                           const char* reason,
+                                           guint delay_ms) {
+  ScopedVideoOutputRenderLock lock(self);
   if (self->destroyed || self->texture_registrar == NULL ||
-      self->texture_gl == NULL ||
-      !texture_gl_is_using_direct_shared_texture(self->texture_gl)) {
+      self->texture_gl == NULL) {
     return;
   }
-  DirectSharedFrameAvailableData* data =
-      g_new0(DirectSharedFrameAvailableData, 1);
+  FrameAvailableData* data = g_new0(FrameAvailableData, 1);
   data->self = VIDEO_OUTPUT(g_object_ref(self));
   data->reason = g_strdup(reason);
   g_timeout_add(delay_ms,
-                video_output_schedule_direct_shared_frame_available_cb, data);
+                video_output_schedule_frame_available_cb, data);
 }
 
+#if defined(FLUTTER_LINUX_GTK4)
+void video_output_schedule_initial_frame_wakeups(VideoOutput* self) {
+  video_output_schedule_frame_available(self, "gtk4_initial_mount_16ms", 16);
+  video_output_schedule_frame_available(self, "gtk4_initial_mount_50ms", 50);
+  video_output_schedule_frame_available(self, "gtk4_initial_mount_250ms", 250);
+  video_output_schedule_frame_available(self, "gtk4_initial_mount_1000ms",
+                                        1000);
+}
+#endif
+
 mpv_render_context* video_output_get_render_context(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   return self->render_context;
 }
 
 EGLDisplay video_output_get_egl_display(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   return self->egl_display;
 }
 
 EGLContext video_output_get_egl_context(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   return self->egl_context;
 }
 
 EGLSurface video_output_get_egl_surface(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   return self->egl_surface;
 }
 
 gboolean video_output_is_using_fallback_egl(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   return self->owns_egl_display;
 }
 
 gint video_output_get_gtk4_texture_interop(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   return self->configuration.gtk4_texture_interop;
 }
 
@@ -713,6 +777,7 @@ guint8* video_output_get_pixel_buffer(VideoOutput* self) {
 }
 
 gint64 video_output_get_width(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   // Fixed width.
   if (self->width) {
     return self->width;
@@ -763,6 +828,7 @@ gint64 video_output_get_width(VideoOutput* self) {
 }
 
 gint64 video_output_get_height(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   // Fixed height.
   if (self->width) {
     return self->height;
@@ -813,6 +879,7 @@ gint64 video_output_get_height(VideoOutput* self) {
 }
 
 gint64 video_output_get_texture_id(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   // H/W
   if (self->texture_gl) {
     return (gint64)self->texture_gl;
@@ -826,6 +893,7 @@ gint64 video_output_get_texture_id(VideoOutput* self) {
 }
 
 void video_output_notify_texture_update(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
   gint64 id = video_output_get_texture_id(self);
   gint64 width = video_output_get_width(self);
   gint64 height = video_output_get_height(self);
