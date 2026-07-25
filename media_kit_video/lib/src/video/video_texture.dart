@@ -151,6 +151,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   late int? _width = widget.controller.player.state.width;
   late int? _height = widget.controller.player.state.height;
   late bool _visible = (_width ?? 0) > 0 && (_height ?? 0) > 0;
+  int? _mountedTextureId;
 
   bool _pauseDueToPauseUponEnteringBackgroundMode = false;
   // Public API:
@@ -238,6 +239,9 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(Video oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.controller != oldWidget.controller) {
+      _mountedTextureId = null;
+    }
 
     final currentParams = videoViewParametersNotifier.value;
 
@@ -403,6 +407,17 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                     if (id != null &&
                                         rect != null &&
                                         _visible) {
+                                      if (_mountedTextureId != id) {
+                                        _mountedTextureId = id;
+                                        WidgetsBinding.instance
+                                            .addPostFrameCallback((_) {
+                                          if (mounted &&
+                                              _mountedTextureId == id) {
+                                            unawaited(notifier
+                                                .notifyTextureMounted());
+                                          }
+                                        });
+                                      }
                                       return SizedBox(
                                         // Apply aspect ratio if provided.
                                         width:
@@ -439,6 +454,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                         ),
                                       );
                                     }
+                                    _mountedTextureId = null;
                                     return const SizedBox.shrink();
                                   },
                                 );
