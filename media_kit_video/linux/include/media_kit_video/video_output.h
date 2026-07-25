@@ -121,7 +121,9 @@ gboolean video_output_is_using_fallback_egl(VideoOutput* self);
 
 gint video_output_get_gtk4_texture_interop(VideoOutput* self);
 
-guint8* video_output_get_pixel_buffer(VideoOutput* self);
+gboolean video_output_copy_pixel_buffer(VideoOutput* self,
+                                        guint8* destination,
+                                        gsize destination_length);
 
 gint64 video_output_get_width(VideoOutput* self);
 
