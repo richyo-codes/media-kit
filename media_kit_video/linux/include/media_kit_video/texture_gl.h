@@ -22,8 +22,6 @@ G_DECLARE_FINAL_TYPE(TextureGL, texture_gl, TEXTURE_GL, TEXTURE_GL, FlTextureGL)
 
 TextureGL* texture_gl_new(VideoOutput* video_output);
 
-gboolean texture_gl_is_using_direct_shared_texture(TextureGL* self);
-
 /**
  * @brief Populates texture with video frame.
  */
