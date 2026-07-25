@@ -183,8 +183,7 @@ class NativeVideoController extends PlatformVideoController {
           'height': configuration.height.toString(),
           'enableHardwareAcceleration':
               configuration.enableHardwareAcceleration,
-          'linuxGtk4TextureInterop':
-              configuration.linuxGtk4TextureInterop?.name ?? 'null',
+          'linuxGtk4TextureInterop': configuration.linuxGtk4TextureInterop.name,
         },
       },
     );
@@ -235,6 +234,20 @@ class NativeVideoController extends PlatformVideoController {
         },
       );
     }
+  }
+
+  @override
+  Future<void> notifyTextureMounted() async {
+    if (!Platform.isLinux) {
+      return;
+    }
+    final handle = await player.handle;
+    await _channel.invokeMethod(
+      'VideoOutputManager.MarkFrameAvailable',
+      {
+        'handle': handle.toString(),
+      },
+    );
   }
 
   /// Disposes the instance. Releases allocated resources back to the system.

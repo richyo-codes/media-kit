@@ -60,6 +60,9 @@ abstract class PlatformVideoController {
     int? height,
   });
 
+  /// Notifies the platform that the texture is mounted in the widget tree.
+  Future<void> notifyTextureMounted() async {}
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
       waitUntilFirstFrameRenderedCompleter.future;
@@ -132,8 +135,8 @@ class VideoControllerConfiguration {
 
   /// Selects the GTK4 Linux texture interop path.
   ///
-  /// Default: `null`, which lets the native Linux backend choose.
-  final LinuxGtk4TextureInterop? linuxGtk4TextureInterop;
+  /// Default: [LinuxGtk4TextureInterop.directSharedTexture] (native shared texture).
+  final LinuxGtk4TextureInterop linuxGtk4TextureInterop;
 
   /// {@macro video_controller_configuration}
   const VideoControllerConfiguration({
@@ -144,7 +147,7 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.androidAttachSurfaceAfterVideoParameters,
-    this.linuxGtk4TextureInterop,
+    this.linuxGtk4TextureInterop = LinuxGtk4TextureInterop.directSharedTexture,
   });
 
   /// Returns a copy of this class with the given fields replaced by the new values.
