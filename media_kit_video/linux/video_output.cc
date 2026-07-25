@@ -13,6 +13,8 @@
 #include <epoxy/egl.h>
 #include <epoxy/glx.h>
 
+#include <cstring>
+
 // Fallback when Flutter toolchain does not export FLUTTER_LINUX_GTK3/GTK4.
 #if !defined(FLUTTER_LINUX_GTK4) && !defined(FLUTTER_LINUX_GTK3)
 #if GTK_MAJOR_VERSION >= 4
@@ -772,8 +774,19 @@ gint video_output_get_gtk4_texture_interop(VideoOutput* self) {
   return self->configuration.gtk4_texture_interop;
 }
 
-guint8* video_output_get_pixel_buffer(VideoOutput* self) {
-  return self->pixel_buffer;
+gboolean video_output_copy_pixel_buffer(VideoOutput* self,
+                                        guint8* destination,
+                                        gsize destination_length) {
+  g_return_val_if_fail(destination != NULL, FALSE);
+
+  g_mutex_lock(&self->mutex);
+  gboolean copied = self->pixel_buffer != NULL &&
+                    destination_length <= SW_RENDERING_PIXEL_BUFFER_SIZE;
+  if (copied) {
+    memcpy(destination, self->pixel_buffer, destination_length);
+  }
+  g_mutex_unlock(&self->mutex);
+  return copied;
 }
 
 gint64 video_output_get_width(VideoOutput* self) {
