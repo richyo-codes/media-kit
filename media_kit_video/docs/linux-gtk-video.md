@@ -26,6 +26,51 @@ On the current Flutter GTK4 engine path, Wayland uses a shareable EGL texture.
 X11/GLX uses full-frame CPU readback. The GTK Cairo renderer is also a software
 configuration and is not a performance target.
 
+## DMA-BUF Scope And Future External Textures
+
+The Flutter GTK4 compositor can experimentally export the final Flutter frame
+as a `GdkDmabufTexture`. That is downstream of media-kit:
+
+```text
+mpv FBO -> FlTextureGL -> Flutter compositor -> optional GdkDmabufTexture
+```
+
+It can improve GTK's final presentation, particularly when GSK uses Vulkan,
+but it does not turn the media-kit `FlTextureGL` input into a DMA-BUF texture.
+The current direct-shared-texture and EGLImage-bridge modes remain OpenGL
+contracts and do not contain plane FDs, DRM fourcc/modifier data, or explicit
+sync fences.
+
+Do not make media-kit choose its interop path from a boolean reporting whether
+the compositor's final-frame DMA-BUF path is active. That is a presentation
+detail and says nothing about whether Flutter can import a DMA-BUF video frame.
+
+A future DMA-BUF path belongs on a versioned Flutter `FlTextureRegistrar`
+capability and external-texture API. The API must negotiate formats and
+modifiers and define per-frame FD, fence, release, and context-loss ownership.
+Until that contract exists, media-kit should retain `FlTextureGL` for both GTK3
+and GTK4 and treat the compositor DMA-BUF path as an independent opt-in
+presentation optimization.
+
+## GTK4 Resize Invalidation
+
+`VideoOutputManager.SetSize` currently updates the native output dimensions,
+but the changed dimensions are observed by `texture_gl_populate_texture` only
+when Flutter next asks for an external texture frame. A shrinking video target
+can therefore remain allocated and displayed at its old larger size until a
+later mpv frame callback happens to invalidate the texture.
+
+The resize path should schedule exactly one frame-available notification after
+the dimensions change and after the render-state lock has been released. That
+causes Flutter to call `texture_gl_populate_texture`, which already owns the
+FBO/EGLImage reallocation logic. Keep the notification on the GLib main context
+and gate dimension diagnostics behind `MEDIA_KIT_GTK4_DEBUG`.
+
+Validate growth and shrink with active and paused streams, on Wayland and X11,
+and under `GSK_RENDERER=gl`, `ngl`, and `vulkan`. `VK_SUBOPTIMAL_KHR` from GDK
+indicates that GTK's Vulkan swapchain noticed a window resize; it should be
+tracked separately from whether media-kit has applied its smaller render size.
+
 ## Completed Safety Fixes
 
 ### Retain video output for queued frame callbacks
