@@ -798,6 +798,7 @@ void video_output_mark_texture_mounted(VideoOutput* self) {
   video_output_schedule_bootstrap_retry(self, "flutter_texture_mounted");
 }
 
+#if defined(FLUTTER_LINUX_GTK4)
 static gboolean video_output_bootstrap_retry_cb(gpointer user_data) {
   VideoOutput* self = VIDEO_OUTPUT(user_data);
   ScopedVideoOutputRenderLock lock(self);
@@ -809,6 +810,7 @@ static gboolean video_output_bootstrap_retry_cb(gpointer user_data) {
   }
   return G_SOURCE_REMOVE;
 }
+#endif
 
 void video_output_schedule_bootstrap_retry(VideoOutput* self,
                                            const char* reason) {
