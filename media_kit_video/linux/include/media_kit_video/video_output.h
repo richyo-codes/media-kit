@@ -99,6 +99,9 @@ void video_output_mark_texture_mounted(VideoOutput* self);
 void video_output_schedule_bootstrap_retry(VideoOutput* self,
                                            const char* reason);
 void video_output_mark_populate_succeeded(VideoOutput* self);
+void video_output_trace(VideoOutput* self,
+                        const char* event,
+                        const char* detail);
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 
