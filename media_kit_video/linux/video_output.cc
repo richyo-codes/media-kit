@@ -431,15 +431,18 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       }
 
       if (config != NULL) {
-        // Create an isolated EGL context (NOT shared with Flutter)
-        // For GTK4, sharing with Flutter's context improves texture interop.
+        // GTK3 transfers the rendered image through EGLImage and must keep the
+        // mpv context isolated. GTK4's direct texture path requires a shared
+        // context so it can rebind to Flutter after the widget is realized.
         EGLint context_attribs[] = {
             EGL_CONTEXT_CLIENT_VERSION,
             2,
             EGL_NONE,
         };
-        EGLContext share_context =
-            has_flutter_egl ? flutter_context : EGL_NO_CONTEXT;
+        EGLContext share_context = EGL_NO_CONTEXT;
+#if defined(FLUTTER_LINUX_GTK4)
+        share_context = has_flutter_egl ? flutter_context : EGL_NO_CONTEXT;
+#endif
         self->egl_context = eglCreateContext(self->egl_display, config,
                                              share_context, context_attribs);
 
