@@ -63,6 +63,8 @@ struct _VideoOutput {
   gboolean first_populate_succeeded;
   guint bootstrap_retry_index;
   guint bootstrap_retry_source_id;
+  gint64 trace_start_us;
+  guint64 trace_sequence;
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -82,6 +84,37 @@ class ScopedVideoOutputRenderLock {
 };
 
 }  // namespace
+
+static gboolean media_kit_video_trace_enabled() {
+  static gsize initialized = 0;
+  static gboolean enabled = FALSE;
+  if (g_once_init_enter(&initialized)) {
+    const gchar* value = g_getenv("MEDIA_KIT_VIDEO_TRACE");
+    enabled = value != NULL && g_strcmp0(value, "0") != 0 &&
+              g_ascii_strcasecmp(value, "false") != 0 &&
+              g_ascii_strcasecmp(value, "off") != 0;
+    g_once_init_leave(&initialized, 1);
+  }
+  return enabled;
+}
+
+void video_output_trace(VideoOutput* self,
+                        const char* event,
+                        const char* detail) {
+  if (!media_kit_video_trace_enabled()) {
+    return;
+  }
+  const gint64 elapsed_us = g_get_monotonic_time() - self->trace_start_us;
+  g_print("media_kit_video_trace seq=%" G_GUINT64_FORMAT
+          " elapsed_us=%" G_GINT64_FORMAT
+          " self=%p event=%s detail=%s "
+          "mounted=%d populated=%d retry=%u size=%" G_GINT64_FORMAT
+          "x%" G_GINT64_FORMAT "\n",
+          ++self->trace_sequence, elapsed_us, self, event,
+          detail != NULL ? detail : "none", self->texture_mounted,
+          self->first_populate_succeeded, self->bootstrap_retry_index,
+          self->width, self->height);
+}
 
 static gboolean video_output_resolve_flutter_egl_config(EGLDisplay display,
                                                         EGLContext context,
@@ -248,6 +281,8 @@ static void video_output_init(VideoOutput* self) {
   self->first_populate_succeeded = FALSE;
   self->bootstrap_retry_index = 0;
   self->bootstrap_retry_source_id = 0;
+  self->trace_start_us = g_get_monotonic_time();
+  self->trace_sequence = 0;
   g_mutex_init(&self->mutex);
   g_rec_mutex_init(&self->render_mutex);
 }
@@ -693,6 +728,8 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
           if (self->destroyed || self->render_context == NULL) {
             return G_SOURCE_REMOVE;
           }
+          video_output_trace(self, "mpv_playlist_restart",
+                             "gtk4_render_context_replaced");
           const char* command[] = {"playlist-play-index", "current", NULL};
           const int result = mpv_command(self->handle, command);
           if (result < 0) {
@@ -741,9 +778,13 @@ void video_output_mark_frame_available(VideoOutput* self, const char* reason) {
       self->texture_gl == NULL) {
     return;
   }
-  (void)reason;
-  fl_texture_registrar_mark_texture_frame_available(
+  const gboolean marked = fl_texture_registrar_mark_texture_frame_available(
       self->texture_registrar, FL_TEXTURE(self->texture_gl));
+  if (media_kit_video_trace_enabled()) {
+    g_autofree gchar* detail = g_strdup_printf(
+        "reason=%s accepted=%d", reason != NULL ? reason : "none", marked);
+    video_output_trace(self, "mark_frame_available", detail);
+  }
 }
 
 void video_output_mark_texture_mounted(VideoOutput* self) {
@@ -752,6 +793,7 @@ void video_output_mark_texture_mounted(VideoOutput* self) {
     return;
   }
   self->texture_mounted = TRUE;
+  video_output_trace(self, "flutter_texture_mounted", "platform_channel");
   video_output_mark_frame_available(self, "flutter_texture_mounted");
   video_output_schedule_bootstrap_retry(self, "flutter_texture_mounted");
 }
@@ -761,6 +803,7 @@ static gboolean video_output_bootstrap_retry_cb(gpointer user_data) {
   ScopedVideoOutputRenderLock lock(self);
   self->bootstrap_retry_source_id = 0;
   if (!self->destroyed && !self->first_populate_succeeded) {
+    video_output_trace(self, "bootstrap_retry_fired", "timer");
     video_output_mark_frame_available(self, "gtk4_bootstrap_retry");
     video_output_schedule_bootstrap_retry(self, "previous_retry_fired");
   }
@@ -771,7 +814,6 @@ void video_output_schedule_bootstrap_retry(VideoOutput* self,
                                            const char* reason) {
 #if defined(FLUTTER_LINUX_GTK4)
   static const guint kRetryDelaysMs[] = {16, 50, 250, 1000};
-  (void)reason;
   ScopedVideoOutputRenderLock lock(self);
   if (self->destroyed || self->texture_registrar == NULL ||
       self->texture_gl == NULL || !self->texture_mounted ||
@@ -780,6 +822,11 @@ void video_output_schedule_bootstrap_retry(VideoOutput* self,
     return;
   }
   const guint delay_ms = kRetryDelaysMs[self->bootstrap_retry_index++];
+  if (media_kit_video_trace_enabled()) {
+    g_autofree gchar* detail = g_strdup_printf(
+        "reason=%s delay_ms=%u", reason != NULL ? reason : "none", delay_ms);
+    video_output_trace(self, "bootstrap_retry_scheduled", detail);
+  }
   self->bootstrap_retry_source_id = g_timeout_add_full(
       G_PRIORITY_DEFAULT, delay_ms, video_output_bootstrap_retry_cb,
       g_object_ref(self), g_object_unref);
@@ -799,6 +846,7 @@ void video_output_mark_populate_succeeded(VideoOutput* self) {
     g_source_remove(self->bootstrap_retry_source_id);
     self->bootstrap_retry_source_id = 0;
   }
+  video_output_trace(self, "first_populate_succeeded", "mpv_frame_rendered");
 }
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self) {

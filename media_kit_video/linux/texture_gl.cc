@@ -39,6 +39,7 @@ static gboolean has_current_egl_context() {
 }
 
 static gboolean retry_bootstrap(VideoOutput* video_output, const char* reason) {
+  video_output_trace(video_output, "populate_deferred", reason);
   video_output_schedule_bootstrap_retry(video_output, reason);
   return FALSE;
 }
@@ -330,6 +331,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   gint32 required_width = (guint32)video_output_get_width(video_output);
   gint32 required_height = (guint32)video_output_get_height(video_output);
   gboolean rendered_frame = FALSE;
+  video_output_trace(video_output, "populate_begin",
+                     "external_texture_callback");
 
 #if defined(FLUTTER_LINUX_GTK4)
   EGLDisplay initial_flutter_display = eglGetCurrentDisplay();
