@@ -8,13 +8,19 @@
 
 #include "include/media_kit_video/texture_gl.h"
 
-#include <epoxy/gl.h>
 #include <epoxy/egl.h>
+#include <epoxy/gl.h>
 
 // EGLImage extension function pointers
-typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attrib_list);
-typedef EGLBoolean (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay dpy, EGLImageKHR image);
-typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(GLenum target, GLeglImageOES image);
+typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay dpy,
+                                                EGLContext ctx,
+                                                EGLenum target,
+                                                EGLClientBuffer buffer,
+                                                const EGLint* attrib_list);
+typedef EGLBoolean (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay dpy,
+                                                EGLImageKHR image);
+typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(GLenum target,
+                                                    GLeglImageOES image);
 
 // Define the extension functions
 #ifndef eglCreateImageKHR
@@ -30,6 +36,11 @@ static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = NULL;
 static gboolean has_current_egl_context() {
   return eglGetCurrentDisplay() != EGL_NO_DISPLAY &&
          eglGetCurrentContext() != EGL_NO_CONTEXT;
+}
+
+static gboolean retry_bootstrap(VideoOutput* video_output, const char* reason) {
+  video_output_schedule_bootstrap_retry(video_output, reason);
+  return FALSE;
 }
 
 static EGLSyncKHR create_render_fence(EGLDisplay display) {
@@ -100,10 +111,10 @@ static gboolean init_egl_image_extensions() {
 
 struct _TextureGL {
   FlTextureGL parent_instance;
-  guint32 name;              // Flutter's texture name
-  guint32 fbo;               // mpv's FBO
-  guint32 mpv_texture;       // mpv's texture
-  EGLImageKHR egl_image;     // EGLImage for sharing between contexts
+  guint32 name;           // Flutter's texture name
+  guint32 fbo;            // mpv's FBO
+  guint32 mpv_texture;    // mpv's texture
+  EGLImageKHR egl_image;  // EGLImage for sharing between contexts
   gboolean use_direct_shared_texture;
   guint32 current_width;
   guint32 current_height;
@@ -225,13 +236,13 @@ static void texture_gl_release_resources_for_rebind(
 static void texture_gl_dispose(GObject* object) {
   TextureGL* self = TEXTURE_GL(object);
   VideoOutput* video_output = self->video_output;
-  
+
   // Save current context
   EGLDisplay current_display = eglGetCurrentDisplay();
   EGLContext current_context = eglGetCurrentContext();
   EGLSurface current_draw = eglGetCurrentSurface(EGL_DRAW);
   EGLSurface current_read = eglGetCurrentSurface(EGL_READ);
-  
+
   // The bridge texture belongs to Flutter's context. During application
   // shutdown that context may no longer be current (or may already be gone),
   // so never issue GL calls against an unrelated/no context. The driver will
@@ -242,20 +253,20 @@ static void texture_gl_dispose(GObject* object) {
     glDeleteTextures(1, &self->name);
     self->name = 0;
   }
-  
+
   // Clean up EGLImage
   if (self->egl_image != EGL_NO_IMAGE_KHR && video_output != NULL) {
     EGLDisplay egl_display = video_output_get_egl_display(video_output);
     eglDestroyImageKHR(egl_display, self->egl_image);
     self->egl_image = EGL_NO_IMAGE_KHR;
   }
-  
+
   // Clean up mpv's OpenGL resources (in mpv's isolated context)
   if (video_output != NULL) {
     EGLDisplay egl_display = video_output_get_egl_display(video_output);
     EGLContext egl_context = video_output_get_egl_context(video_output);
     EGLSurface egl_surface = video_output_get_egl_surface(video_output);
-    
+
     if (egl_display != EGL_NO_DISPLAY && egl_context != EGL_NO_CONTEXT) {
       EGLSurface draw_read_surface =
           egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
@@ -283,7 +294,7 @@ static void texture_gl_dispose(GObject* object) {
       }
     }
   }
-  
+
   self->current_width = 1;
   self->current_height = 1;
   self->use_direct_shared_texture = FALSE;
@@ -318,19 +329,26 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   ScopedVideoOutputRenderLock lock(video_output);
   gint32 required_width = (guint32)video_output_get_width(video_output);
   gint32 required_height = (guint32)video_output_get_height(video_output);
+  gboolean rendered_frame = FALSE;
 
 #if defined(FLUTTER_LINUX_GTK4)
   EGLDisplay initial_flutter_display = eglGetCurrentDisplay();
   EGLContext initial_flutter_context = eglGetCurrentContext();
   EGLSurface initial_flutter_draw = eglGetCurrentSurface(EGL_DRAW);
   EGLSurface initial_flutter_read = eglGetCurrentSurface(EGL_READ);
+  gboolean use_direct_shared_context =
+      media_kit_gtk4_allow_direct_shared_texture(video_output);
   if (initial_flutter_display != EGL_NO_DISPLAY &&
       initial_flutter_context != EGL_NO_CONTEXT) {
+    if (!use_direct_shared_context && !init_egl_image_extensions()) {
+      return retry_bootstrap(video_output, "egl_image_extensions_unavailable");
+    }
     const gboolean binding_changed = texture_gl_flutter_binding_changed(
         self, initial_flutter_display, initial_flutter_context,
         initial_flutter_draw, initial_flutter_read);
-    if (video_output_get_render_context(video_output) == NULL ||
-        binding_changed) {
+    if (use_direct_shared_context &&
+        (video_output_get_render_context(video_output) == NULL ||
+         binding_changed)) {
       if (binding_changed &&
           (self->name != 0 || self->fbo != 0 || self->mpv_texture != 0)) {
         texture_gl_release_resources_for_rebind(
@@ -338,7 +356,7 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
             initial_flutter_draw, initial_flutter_read);
       }
       if (!video_output_rebind_to_flutter_current_context(video_output)) {
-        return FALSE;
+        return retry_bootstrap(video_output, "initial_context_rebind_failed");
       }
       texture_gl_record_flutter_binding(
           self, initial_flutter_display, initial_flutter_context,
@@ -350,37 +368,37 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   if (has_current_egl_context()) {
     clear_gl_errors("populate.begin");
   }
-  
+
   if (required_width > 0 && required_height > 0) {
-    gboolean first_frame = self->name == 0 || self->fbo == 0 || self->mpv_texture == 0;
+    gboolean first_frame =
+        self->name == 0 || self->fbo == 0 || self->mpv_texture == 0;
     gboolean resize = self->current_width != required_width ||
                       self->current_height != required_height;
-    
+
     if (first_frame || resize) {
       // Save Flutter's current EGL context
       EGLDisplay flutter_display = eglGetCurrentDisplay();
       EGLContext flutter_context = eglGetCurrentContext();
       EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
       EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
-      gboolean has_flutter_context =
-          flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT;
+      gboolean has_flutter_context = flutter_display != EGL_NO_DISPLAY &&
+                                     flutter_context != EGL_NO_CONTEXT;
 #if defined(FLUTTER_LINUX_GTK4)
       if (flutter_display == EGL_NO_DISPLAY ||
           flutter_context == EGL_NO_CONTEXT) {
-        return FALSE;
+        return retry_bootstrap(video_output,
+                               "flutter_context_unavailable_init");
       }
-      if (video_output_get_render_context(video_output) == NULL ||
-          texture_gl_flutter_binding_changed(self, flutter_display,
-                                            flutter_context, flutter_draw,
-                                            flutter_read)) {
+      if (use_direct_shared_context &&
+          (video_output_get_render_context(video_output) == NULL ||
+           texture_gl_flutter_binding_changed(self, flutter_display,
+                                              flutter_context, flutter_draw,
+                                              flutter_read))) {
         if (!video_output_rebind_to_flutter_current_context(video_output)) {
-          return FALSE;
+          return retry_bootstrap(video_output, "context_rebind_failed_init");
         }
-        if (!init_egl_image_extensions()) {
-          return FALSE;
-        }
-        texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
-                                          flutter_draw, flutter_read);
+        texture_gl_record_flutter_binding(
+            self, flutter_display, flutter_context, flutter_draw, flutter_read);
       }
 #endif
       EGLDisplay egl_display = video_output_get_egl_display(video_output);
@@ -390,14 +408,7 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       const guint32 previous_flutter_texture = self->name;
       const guint32 previous_mpv_texture = self->mpv_texture;
 #if defined(FLUTTER_LINUX_GTK4)
-      can_use_direct_shared_texture =
-          media_kit_gtk4_allow_direct_shared_texture(video_output);
-      if (!can_use_direct_shared_texture && !init_egl_image_extensions()) {
-        g_warning(
-            "media_kit: GTK4 EGLImage interop is unavailable; falling back "
-            "to direct shared textures.");
-        can_use_direct_shared_texture = TRUE;
-      }
+      can_use_direct_shared_texture = use_direct_shared_context;
 #endif
 
       // Switch to mpv's isolated context to create/resize mpv's texture and FBO
@@ -405,9 +416,10 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
           egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
       if (!eglMakeCurrent(egl_display, draw_read_surface, draw_read_surface,
                           egl_context)) {
-        return FALSE;
+        return retry_bootstrap(video_output,
+                               "make_mpv_context_current_failed_init");
       }
-      
+
       // Free previous resources in mpv's context
       if (!first_frame) {
         glDeleteTextures(1, &self->mpv_texture);
@@ -417,11 +429,11 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
           self->egl_image = EGL_NO_IMAGE_KHR;
         }
       }
-      
+
       // Create mpv's FBO and texture
       glGenFramebuffers(1, &self->fbo);
       glBindFramebuffer(GL_FRAMEBUFFER, self->fbo);
-      
+
       glGenTextures(1, &self->mpv_texture);
       glBindTexture(GL_TEXTURE_2D, self->mpv_texture);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -430,33 +442,33 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, required_width, required_height,
                    0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-      
+
       // Attach mpv's texture to FBO
       glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                              GL_TEXTURE_2D, self->mpv_texture, 0);
-      
+
       if (!can_use_direct_shared_texture) {
         // Create EGLImage from mpv's texture for cross-context bridging.
-        EGLint egl_image_attribs[] = { EGL_NONE };
+        EGLint egl_image_attribs[] = {EGL_NONE};
         self->egl_image = eglCreateImageKHR(
-            egl_display,
-            egl_context,
-            EGL_GL_TEXTURE_2D_KHR,
-            (EGLClientBuffer)(guintptr)self->mpv_texture,
-            egl_image_attribs);
+            egl_display, egl_context, EGL_GL_TEXTURE_2D_KHR,
+            (EGLClientBuffer)(guintptr)self->mpv_texture, egl_image_attribs);
         if (self->egl_image == EGL_NO_IMAGE_KHR) {
-          g_warning(
-              "media_kit: Failed to create a GTK4 EGLImage; falling back "
-              "to direct shared textures.");
-          can_use_direct_shared_texture = TRUE;
+          glDeleteTextures(1, &self->mpv_texture);
+          glDeleteFramebuffers(1, &self->fbo);
+          self->mpv_texture = 0;
+          self->fbo = 0;
+          eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
+                         flutter_context);
+          return retry_bootstrap(video_output, "egl_image_create_failed");
         }
       } else {
         self->egl_image = EGL_NO_IMAGE_KHR;
       }
-      
+
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
       glBindTexture(GL_TEXTURE_2D, 0);
-      
+
       // Flush to ensure mpv's texture is ready
       glFlush();
       if (can_use_direct_shared_texture) {
@@ -467,7 +479,8 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
         // Switch back to Flutter's context to create/update Flutter's texture.
         if (!eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
                             flutter_context)) {
-          return FALSE;
+          return retry_bootstrap(video_output,
+                                 "restore_flutter_context_failed_init");
         }
 
         // Free previous Flutter texture.
@@ -494,27 +507,20 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       if (has_flutter_context &&
           !eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
                           flutter_context)) {
-        return FALSE;
+        return retry_bootstrap(video_output,
+                               "restore_flutter_context_failed_resize");
       }
       if (can_use_direct_shared_texture && previous_flutter_texture != 0 &&
           previous_flutter_texture != previous_mpv_texture) {
         glDeleteTextures(1, &previous_flutter_texture);
       }
-      
+
       self->current_width = required_width;
       self->current_height = required_height;
-      
-      // GTK4 startup can miss the first frame-available wakeup for either
-      // interop path, which leaves the texture black until a later invalidate.
-      // Keep retrying here for now. The better fix is to find why the initial
-      // mark is rejected and move this to a real readiness signal instead of
-      // papering over mount timing.
+
       video_output_notify_texture_update(video_output);
-#if defined(FLUTTER_LINUX_GTK4)
-      video_output_schedule_initial_frame_wakeups(video_output);
-#endif
     }
-    
+
     // Save Flutter's current context
     EGLDisplay flutter_display = eglGetCurrentDisplay();
     EGLContext flutter_context = eglGetCurrentContext();
@@ -523,27 +529,28 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     EGLDisplay egl_display = video_output_get_egl_display(video_output);
     EGLContext egl_context = video_output_get_egl_context(video_output);
     EGLSurface egl_surface = video_output_get_egl_surface(video_output);
-    mpv_render_context* render_context = video_output_get_render_context(video_output);
+    mpv_render_context* render_context =
+        video_output_get_render_context(video_output);
 
 #if defined(FLUTTER_LINUX_GTK4)
     if (flutter_display == EGL_NO_DISPLAY ||
         flutter_context == EGL_NO_CONTEXT) {
-      return FALSE;
+      return retry_bootstrap(video_output,
+                             "flutter_context_unavailable_render");
     }
-    if (video_output_get_render_context(video_output) == NULL ||
-        texture_gl_flutter_binding_changed(self, flutter_display,
-                                          flutter_context, flutter_draw,
-                                          flutter_read)) {
+    if (use_direct_shared_context &&
+        (video_output_get_render_context(video_output) == NULL ||
+         texture_gl_flutter_binding_changed(self, flutter_display,
+                                            flutter_context, flutter_draw,
+                                            flutter_read))) {
       texture_gl_release_resources_for_rebind(
           self, flutter_display, flutter_context, flutter_draw, flutter_read);
       if (!video_output_rebind_to_flutter_current_context(video_output)) {
-        return FALSE;
+        return retry_bootstrap(video_output, "context_rebind_failed_render");
       }
       texture_gl_record_flutter_binding(self, flutter_display, flutter_context,
                                         flutter_draw, flutter_read);
-      video_output_schedule_frame_available(
-          video_output, "gtk4_context_rebind", 0);
-      return FALSE;
+      return retry_bootstrap(video_output, "context_rebound_render_retry");
     }
     egl_display = video_output_get_egl_display(video_output);
     egl_context = video_output_get_egl_context(video_output);
@@ -556,12 +563,13 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
         egl_surface != EGL_NO_SURFACE ? egl_surface : EGL_NO_SURFACE;
     if (!eglMakeCurrent(egl_display, draw_read_surface, draw_read_surface,
                         egl_context)) {
-      return FALSE;
+      return retry_bootstrap(video_output,
+                             "make_mpv_context_current_failed_render");
     }
-    
+
     // Bind mpv's FBO
     glBindFramebuffer(GL_FRAMEBUFFER, self->fbo);
-    
+
     // Render mpv frame to mpv's texture
     mpv_opengl_fbo fbo{(gint32)self->fbo, required_width, required_height, 0};
     int flip_y = 0;
@@ -573,37 +581,40 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
         {MPV_RENDER_PARAM_INVALID, NULL},
     };
     mpv_render_context_render(render_context, params);
-    
+    rendered_frame = TRUE;
+
     // Unbind FBO
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    
+
     // Publish mpv's writes and, when supported, establish explicit ordering
     // before Flutter samples the texture from its shared context.
     EGLSyncKHR render_fence = create_render_fence(egl_display);
     glFlush();
-    
+
     // Restore Flutter's context.
     if (!eglMakeCurrent(flutter_display, flutter_draw, flutter_read,
                         flutter_context)) {
       if (render_fence != EGL_NO_SYNC_KHR) {
         eglDestroySyncKHR(egl_display, render_fence);
       }
-      return FALSE;
+      return retry_bootstrap(video_output,
+                             "restore_flutter_context_failed_render");
     }
     wait_for_render_fence(egl_display, render_fence);
     clear_gl_errors("populate.after_restore_flutter_context");
   }
-  
+
   *target = GL_TEXTURE_2D;
   *name = self->name;
   *width = self->current_width;
   *height = self->current_height;
-  
+
   if (self->name == 0) {
     // First frame not yet available - create dummy texture in Flutter's context
     glGenTextures(1, &self->name);
     glBindTexture(GL_TEXTURE_2D, self->name);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 NULL);
     glBindTexture(GL_TEXTURE_2D, 0);
     clear_gl_errors("populate.dummy_texture");
     *name = self->name;
@@ -611,6 +622,10 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     *height = 1;
   }
   clear_gl_errors("populate.end");
-  
+  if (rendered_frame && self->name != 0 && self->current_width > 0 &&
+      self->current_height > 0) {
+    video_output_mark_populate_succeeded(video_output);
+  }
+
   return TRUE;
 }

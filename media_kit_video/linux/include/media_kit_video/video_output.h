@@ -9,8 +9,8 @@
 #ifndef VIDEO_OUTPUT_H_
 #define VIDEO_OUTPUT_H_
 
-#include <flutter_linux/flutter_linux.h>
 #include <epoxy/egl.h>
+#include <flutter_linux/flutter_linux.h>
 
 #include "mpv/client.h"
 #include "mpv/render.h"
@@ -95,15 +95,10 @@ void video_output_lock_render_state(VideoOutput* self);
 void video_output_unlock_render_state(VideoOutput* self);
 
 void video_output_mark_frame_available(VideoOutput* self, const char* reason);
-void video_output_schedule_frame_available(VideoOutput* self,
-                                           const char* reason,
-                                           guint delay_ms);
-
-#if defined(FLUTTER_LINUX_GTK4)
-// Schedules bounded retries that allow Flutter to mount and populate the
-// initial GTK4 external texture after its 1x1 bootstrap notification.
-void video_output_schedule_initial_frame_wakeups(VideoOutput* self);
-#endif
+void video_output_mark_texture_mounted(VideoOutput* self);
+void video_output_schedule_bootstrap_retry(VideoOutput* self,
+                                           const char* reason);
+void video_output_mark_populate_succeeded(VideoOutput* self);
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 
