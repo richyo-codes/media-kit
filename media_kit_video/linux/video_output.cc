@@ -39,7 +39,8 @@
 struct _VideoOutput {
   GObject parent_instance;
   TextureGL* texture_gl;
-  EGLDisplay egl_display; /* EGL display for mpv rendering (shared with flutter). */
+  EGLDisplay
+      egl_display; /* EGL display for mpv rendering (shared with flutter). */
   EGLContext egl_context; /* Isolated EGL context (non-shared). */
   EGLSurface egl_surface; /* Place holder surface for activating egl context */
   guint8* pixel_buffer;
@@ -58,6 +59,10 @@ struct _VideoOutput {
   gboolean owns_egl_display;
   gboolean owns_egl_surface;
   EGLContext bound_flutter_context;
+  gboolean texture_mounted;
+  gboolean first_populate_succeeded;
+  guint bootstrap_retry_index;
+  guint bootstrap_retry_source_id;
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -129,7 +134,11 @@ static void video_output_dispose(GObject* object) {
   VideoOutput* self = VIDEO_OUTPUT(object);
   ScopedVideoOutputRenderLock lock(self);
   self->destroyed = TRUE;
-  
+  if (self->bootstrap_retry_source_id != 0) {
+    g_source_remove(self->bootstrap_retry_source_id);
+    self->bootstrap_retry_source_id = 0;
+  }
+
   // Make sure that no more callbacks are invoked from mpv.
   if (self->render_context) {
     mpv_render_context_set_update_callback(self->render_context, NULL, NULL);
@@ -139,19 +148,19 @@ static void video_output_dispose(GObject* object) {
   if (self->texture_gl) {
     fl_texture_registrar_unregister_texture(self->texture_registrar,
                                             FL_TEXTURE(self->texture_gl));
-    
+
     // Save Flutter's current context before cleanup
     EGLDisplay current_display = eglGetCurrentDisplay();
     EGLContext flutter_context = eglGetCurrentContext();
     EGLSurface flutter_draw_surface = eglGetCurrentSurface(EGL_DRAW);
     EGLSurface flutter_read_surface = eglGetCurrentSurface(EGL_READ);
-    
+
     // Free mpv and its GL resources while the media context still exists.
     if (self->render_context != NULL) {
       if (self->egl_context != EGL_NO_CONTEXT) {
-        EGLSurface current_surface =
-            self->egl_surface != EGL_NO_SURFACE ? self->egl_surface
-                                                : EGL_NO_SURFACE;
+        EGLSurface current_surface = self->egl_surface != EGL_NO_SURFACE
+                                         ? self->egl_surface
+                                         : EGL_NO_SURFACE;
         eglMakeCurrent(self->egl_display, current_surface, current_surface,
                        self->egl_context);
       }
@@ -171,7 +180,7 @@ static void video_output_dispose(GObject* object) {
       eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                      EGL_NO_CONTEXT);
     }
-    
+
     // Clean up EGL resources
     if (self->egl_context != EGL_NO_CONTEXT) {
       eglDestroyContext(self->egl_display, self->egl_context);
@@ -188,7 +197,6 @@ static void video_output_dispose(GObject* object) {
       self->egl_display = EGL_NO_DISPLAY;
       self->owns_egl_display = FALSE;
     }
-    
   }
   // S/W
   if (self->texture_sw) {
@@ -201,7 +209,7 @@ static void video_output_dispose(GObject* object) {
       self->render_context = NULL;
     }
   }
-  
+
   G_OBJECT_CLASS(video_output_parent_class)->dispose(object);
 }
 
@@ -236,6 +244,10 @@ static void video_output_init(VideoOutput* self) {
   self->owns_egl_display = FALSE;
   self->owns_egl_surface = FALSE;
   self->bound_flutter_context = EGL_NO_CONTEXT;
+  self->texture_mounted = FALSE;
+  self->first_populate_succeeded = FALSE;
+  self->bootstrap_retry_index = 0;
+  self->bootstrap_retry_source_id = 0;
   g_mutex_init(&self->mutex);
   g_rec_mutex_init(&self->render_mutex);
 }
@@ -262,7 +274,7 @@ static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
   } else
 #endif
 #if defined(GDK_WINDOWING_X11)
-  if (GDK_IS_X11_DISPLAY(display)) {
+      if (GDK_IS_X11_DISPLAY(display)) {
     params[2].type = MPV_RENDER_PARAM_X11_DISPLAY;
 #if defined(FLUTTER_LINUX_GTK4)
     G_GNUC_BEGIN_IGNORE_DEPRECATIONS
@@ -273,7 +285,8 @@ static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
 #endif
   }
 #endif
-  {}
+  {
+  }
 
   if (mpv_render_context_create(&self->render_context, self->handle, params) !=
       0) {
@@ -291,8 +304,7 @@ static gboolean video_output_create_mpv_render_context(VideoOutput* self) {
               if (self->destroyed || self->texture_gl == NULL) {
                 return FALSE;
               }
-              fl_texture_registrar_mark_texture_frame_available(
-                  self->texture_registrar, FL_TEXTURE(self->texture_gl));
+              video_output_mark_frame_available(self, "mpv_render_update");
               return FALSE;
             },
             g_object_ref(data), g_object_unref);
@@ -327,7 +339,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
     EGLContext flutter_context = eglGetCurrentContext();
     EGLSurface flutter_draw_surface = eglGetCurrentSurface(EGL_DRAW);
     EGLSurface flutter_read_surface = eglGetCurrentSurface(EGL_READ);
-    
+
     bool has_flutter_egl =
         flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT;
     if (has_flutter_egl) {
@@ -346,10 +358,9 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
     }
 #endif
     if (self->egl_display != EGL_NO_DISPLAY) {
-      
       // Bind OpenGL ES API (Flutter uses OpenGL ES on Linux)
       eglBindAPI(EGL_OPENGL_ES_API);
-      
+
       // Query Flutter's EGL config and reuse it for compatibility.
       // If unavailable/invalid, fallback to a generic pbuffer-capable config.
       EGLConfig config = NULL;
@@ -363,10 +374,18 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       if (config == NULL) {
         EGLint num_configs = 0;
         EGLint config_attribs[] = {
-            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,   EGL_RENDERABLE_TYPE,
-            EGL_OPENGL_ES2_BIT, EGL_RED_SIZE,    8,
-            EGL_GREEN_SIZE,     8,               EGL_BLUE_SIZE,
-            8,                  EGL_ALPHA_SIZE,  8,
+            EGL_SURFACE_TYPE,
+            EGL_PBUFFER_BIT,
+            EGL_RENDERABLE_TYPE,
+            EGL_OPENGL_ES2_BIT,
+            EGL_RED_SIZE,
+            8,
+            EGL_GREEN_SIZE,
+            8,
+            EGL_BLUE_SIZE,
+            8,
+            EGL_ALPHA_SIZE,
+            8,
             EGL_NONE,
         };
         if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
@@ -375,12 +394,13 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
         } else {
         }
       }
-      
-      if (config != NULL) {        
+
+      if (config != NULL) {
         // Create an isolated EGL context (NOT shared with Flutter)
         // For GTK4, sharing with Flutter's context improves texture interop.
         EGLint context_attribs[] = {
-            EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL_CONTEXT_CLIENT_VERSION,
+            2,
             EGL_NONE,
         };
         EGLContext share_context =
@@ -389,16 +409,13 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                                              share_context, context_attribs);
 
         if (self->egl_context != EGL_NO_CONTEXT) {
-          // Use a tiny pbuffer surface for broader EGL compatibility on GTK4 drivers.
+          // Use a tiny pbuffer surface for broader EGL compatibility on GTK4
+          // drivers.
           EGLint pbuffer_attribs[] = {
-              EGL_WIDTH,
-              1,
-              EGL_HEIGHT,
-              1,
-              EGL_NONE,
+              EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE,
           };
-          self->egl_surface = eglCreatePbufferSurface(
-              self->egl_display, config, pbuffer_attribs);
+          self->egl_surface = eglCreatePbufferSurface(self->egl_display, config,
+                                                      pbuffer_attribs);
           if (self->egl_surface == EGL_NO_SURFACE) {
             self->owns_egl_surface = FALSE;
           } else {
@@ -406,21 +423,21 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
           }
 
           // Make isolated context current for initialization.
-          EGLSurface current_surface =
-              self->egl_surface != EGL_NO_SURFACE ? self->egl_surface
-                                                  : EGL_NO_SURFACE;
-          if (eglMakeCurrent(self->egl_display, current_surface, current_surface,
-                             self->egl_context)) {
+          EGLSurface current_surface = self->egl_surface != EGL_NO_SURFACE
+                                           ? self->egl_surface
+                                           : EGL_NO_SURFACE;
+          if (eglMakeCurrent(self->egl_display, current_surface,
+                             current_surface, self->egl_context)) {
             // Create texture with our isolated context
             self->texture_gl = texture_gl_new(self);
-            
+
             if (fl_texture_registrar_register_texture(
                     texture_registrar, FL_TEXTURE(self->texture_gl))) {
               if (video_output_create_mpv_render_context(self)) {
                 hardware_acceleration_supported = TRUE;
               }
             }
-            
+
             // Restore Flutter's context if available.
             if (has_flutter_egl) {
               eglMakeCurrent(flutter_display, flutter_draw_surface,
@@ -510,13 +527,6 @@ void video_output_set_texture_update_callback(
     self->texture_update_callback(texture_id, self->width, self->height,
                                   self->texture_update_callback_context);
   }
-#if defined(FLUTTER_LINUX_GTK4)
-  // The initial mpv update can arrive before Flutter has mounted the Texture
-  // created by the callback above. Retry after the platform-channel delivery
-  // instead of waiting for populate_texture(), which cannot run until a mark
-  // succeeds.
-  video_output_schedule_initial_frame_wakeups(self);
-#endif
 }
 
 gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
@@ -534,22 +544,25 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
     return FALSE;
   }
 
-  if (self->egl_display == flutter_display && self->egl_context != EGL_NO_CONTEXT &&
-      self->render_context != NULL &&
+  if (self->egl_display == flutter_display &&
+      self->egl_context != EGL_NO_CONTEXT && self->render_context != NULL &&
       self->bound_flutter_context == flutter_context) {
     return TRUE;
   }
 
-  if (self->render_context != NULL) {
+  const gboolean replaced_active_render_context = self->render_context != NULL;
+  if (replaced_active_render_context) {
     mpv_render_context_set_update_callback(self->render_context, NULL, NULL);
     mpv_render_context_free(self->render_context);
     self->render_context = NULL;
   }
-  if (self->egl_context != EGL_NO_CONTEXT && self->egl_display != EGL_NO_DISPLAY) {
+  if (self->egl_context != EGL_NO_CONTEXT &&
+      self->egl_display != EGL_NO_DISPLAY) {
     eglDestroyContext(self->egl_display, self->egl_context);
     self->egl_context = EGL_NO_CONTEXT;
   }
-  if (self->egl_surface != EGL_NO_SURFACE && self->egl_display != EGL_NO_DISPLAY) {
+  if (self->egl_surface != EGL_NO_SURFACE &&
+      self->egl_display != EGL_NO_DISPLAY) {
     if (self->owns_egl_surface) {
       eglDestroySurface(self->egl_display, self->egl_surface);
     }
@@ -576,10 +589,18 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   if (config == NULL) {
     EGLint num_configs = 0;
     EGLint config_attribs[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,   EGL_RENDERABLE_TYPE,
-        EGL_OPENGL_ES2_BIT, EGL_RED_SIZE,    8,
-        EGL_GREEN_SIZE,     8,               EGL_BLUE_SIZE,
-        8,                  EGL_ALPHA_SIZE,  8,
+        EGL_SURFACE_TYPE,
+        EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE,
+        EGL_OPENGL_ES2_BIT,
+        EGL_RED_SIZE,
+        8,
+        EGL_GREEN_SIZE,
+        8,
+        EGL_BLUE_SIZE,
+        8,
+        EGL_ALPHA_SIZE,
+        8,
         EGL_NONE,
     };
     if (eglChooseConfig(self->egl_display, config_attribs, &config, 1,
@@ -595,19 +616,15 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
       2,
       EGL_NONE,
   };
-  self->egl_context = eglCreateContext(self->egl_display, config, flutter_context,
-                                       context_attribs);
+  self->egl_context = eglCreateContext(self->egl_display, config,
+                                       flutter_context, context_attribs);
   if (self->egl_context == EGL_NO_CONTEXT) {
     self->bound_flutter_context = EGL_NO_CONTEXT;
     return FALSE;
   }
 
   EGLint pbuffer_attribs[] = {
-      EGL_WIDTH,
-      1,
-      EGL_HEIGHT,
-      1,
-      EGL_NONE,
+      EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE,
   };
   self->egl_surface =
       eglCreatePbufferSurface(self->egl_display, config, pbuffer_attribs);
@@ -662,12 +679,37 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   self->bound_flutter_context = flutter_context;
   eglMakeCurrent(flutter_display, flutter_draw_surface, flutter_read_surface,
                  flutter_context);
+
+  if (replaced_active_render_context) {
+    // libmpv disables video when an active render context is freed. GTK4 must
+    // replace the bootstrap context once Flutter's EGL context becomes current,
+    // so reinitialize mpv's video output after the replacement. A future native
+    // readiness handshake should create the final context before playback and
+    // remove the need for this recovery path.
+    g_idle_add_full(
+        G_PRIORITY_HIGH_IDLE,
+        [](gpointer data) -> gboolean {
+          VideoOutput* self = VIDEO_OUTPUT(data);
+          if (self->destroyed || self->render_context == NULL) {
+            return G_SOURCE_REMOVE;
+          }
+          const char* command[] = {"playlist-play-index", "current", NULL};
+          const int result = mpv_command(self->handle, command);
+          if (result < 0) {
+            g_warning("media_kit: GTK4 playlist restart failed: %s",
+                      mpv_error_string(result));
+          }
+          return G_SOURCE_REMOVE;
+        },
+        g_object_ref(self), g_object_unref);
+  }
   return TRUE;
 #endif
 }
 
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
   ScopedVideoOutputRenderLock lock(self);
+  const gboolean size_changed = self->width != width || self->height != height;
 
   // H/W
   if (self->texture_gl) {
@@ -678,6 +720,10 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
   if (self->texture_sw) {
     self->width = CLAMP(width, 0, SW_RENDERING_MAX_WIDTH);
     self->height = CLAMP(height, 0, SW_RENDERING_MAX_HEIGHT);
+  }
+
+  if (size_changed && width > 0 && height > 0 && self->texture_mounted) {
+    video_output_mark_frame_available(self, "video_output_resized");
   }
 }
 
@@ -700,49 +746,60 @@ void video_output_mark_frame_available(VideoOutput* self, const char* reason) {
       self->texture_registrar, FL_TEXTURE(self->texture_gl));
 }
 
-typedef struct _FrameAvailableData {
-  VideoOutput* self;
-  char* reason;
-} FrameAvailableData;
+void video_output_mark_texture_mounted(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
+  if (self->destroyed || self->texture_gl == NULL) {
+    return;
+  }
+  self->texture_mounted = TRUE;
+  video_output_mark_frame_available(self, "flutter_texture_mounted");
+  video_output_schedule_bootstrap_retry(self, "flutter_texture_mounted");
+}
 
-static gboolean video_output_schedule_frame_available_cb(
-    gpointer user_data) {
-  FrameAvailableData* data = (FrameAvailableData*)user_data;
-  if (data->self != NULL && !data->self->destroyed) {
-    video_output_mark_frame_available(data->self, data->reason);
+static gboolean video_output_bootstrap_retry_cb(gpointer user_data) {
+  VideoOutput* self = VIDEO_OUTPUT(user_data);
+  ScopedVideoOutputRenderLock lock(self);
+  self->bootstrap_retry_source_id = 0;
+  if (!self->destroyed && !self->first_populate_succeeded) {
+    video_output_mark_frame_available(self, "gtk4_bootstrap_retry");
+    video_output_schedule_bootstrap_retry(self, "previous_retry_fired");
   }
-  if (data->self != NULL) {
-    g_object_unref(data->self);
-  }
-  g_free(data->reason);
-  g_free(data);
   return G_SOURCE_REMOVE;
 }
 
-void video_output_schedule_frame_available(VideoOutput* self,
-                                           const char* reason,
-                                           guint delay_ms) {
+void video_output_schedule_bootstrap_retry(VideoOutput* self,
+                                           const char* reason) {
+#if defined(FLUTTER_LINUX_GTK4)
+  static const guint kRetryDelaysMs[] = {16, 50, 250, 1000};
+  (void)reason;
   ScopedVideoOutputRenderLock lock(self);
   if (self->destroyed || self->texture_registrar == NULL ||
-      self->texture_gl == NULL) {
+      self->texture_gl == NULL || !self->texture_mounted ||
+      self->first_populate_succeeded || self->bootstrap_retry_source_id != 0 ||
+      self->bootstrap_retry_index >= G_N_ELEMENTS(kRetryDelaysMs)) {
     return;
   }
-  FrameAvailableData* data = g_new0(FrameAvailableData, 1);
-  data->self = VIDEO_OUTPUT(g_object_ref(self));
-  data->reason = g_strdup(reason);
-  g_timeout_add(delay_ms,
-                video_output_schedule_frame_available_cb, data);
+  const guint delay_ms = kRetryDelaysMs[self->bootstrap_retry_index++];
+  self->bootstrap_retry_source_id = g_timeout_add_full(
+      G_PRIORITY_DEFAULT, delay_ms, video_output_bootstrap_retry_cb,
+      g_object_ref(self), g_object_unref);
+#else
+  (void)self;
+  (void)reason;
+#endif
 }
 
-#if defined(FLUTTER_LINUX_GTK4)
-void video_output_schedule_initial_frame_wakeups(VideoOutput* self) {
-  video_output_schedule_frame_available(self, "gtk4_initial_mount_16ms", 16);
-  video_output_schedule_frame_available(self, "gtk4_initial_mount_50ms", 50);
-  video_output_schedule_frame_available(self, "gtk4_initial_mount_250ms", 250);
-  video_output_schedule_frame_available(self, "gtk4_initial_mount_1000ms",
-                                        1000);
+void video_output_mark_populate_succeeded(VideoOutput* self) {
+  ScopedVideoOutputRenderLock lock(self);
+  if (self->first_populate_succeeded) {
+    return;
+  }
+  self->first_populate_succeeded = TRUE;
+  if (self->bootstrap_retry_source_id != 0) {
+    g_source_remove(self->bootstrap_retry_source_id);
+    self->bootstrap_retry_source_id = 0;
+  }
 }
-#endif
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self) {
   ScopedVideoOutputRenderLock lock(self);

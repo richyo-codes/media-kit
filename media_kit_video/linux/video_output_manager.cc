@@ -73,7 +73,7 @@ void video_output_manager_mark_frame_available(VideoOutputManager* self,
   if (g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
     VideoOutput* video_output = VIDEO_OUTPUT(
         g_hash_table_lookup(self->video_outputs, GINT_TO_POINTER(handle)));
-    video_output_mark_frame_available(video_output, "flutter_texture_mounted");
+    video_output_mark_texture_mounted(video_output);
   }
 }
 
