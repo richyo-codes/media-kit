@@ -91,6 +91,13 @@ class NativeVideoController extends PlatformVideoController {
           height = event.dw ?? 0;
         }
 
+        // mpv can transiently report 0x0 while a stream is initializing or
+        // reconfiguring. Keep the last renderable native texture size until a
+        // real frame size is available again.
+        if (width <= 0 || height <= 0) {
+          return;
+        }
+
         if (videoParamsWidth == width && videoParamsHeight == height) {
           return;
         }
