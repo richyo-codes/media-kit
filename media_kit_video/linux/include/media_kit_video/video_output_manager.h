@@ -64,6 +64,9 @@ void video_output_manager_set_size(VideoOutputManager* self,
                                    gint64 width,
                                    gint64 height);
 
+void video_output_manager_mark_frame_available(VideoOutputManager* self,
+                                               gint64 handle);
+
 /**
  * @brief Disposes |VideoOutput| instance for given |handle|.
  *

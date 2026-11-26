@@ -9,8 +9,8 @@
 #ifndef VIDEO_OUTPUT_H_
 #define VIDEO_OUTPUT_H_
 
-#include <flutter_linux/flutter_linux.h>
 #include <epoxy/egl.h>
+#include <flutter_linux/flutter_linux.h>
 
 #include "mpv/client.h"
 #include "mpv/render.h"
@@ -88,6 +88,18 @@ void video_output_set_texture_update_callback(
  */
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height);
 
+void video_output_lock_render_state(VideoOutput* self);
+void video_output_unlock_render_state(VideoOutput* self);
+
+void video_output_mark_frame_available(VideoOutput* self, const char* reason);
+void video_output_mark_texture_mounted(VideoOutput* self);
+void video_output_schedule_bootstrap_retry(VideoOutput* self,
+                                           const char* reason);
+void video_output_mark_populate_succeeded(VideoOutput* self);
+void video_output_trace(VideoOutput* self,
+                        const char* event,
+                        const char* detail);
+
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 
 GdkGLContext* video_output_get_gdk_gl_context(VideoOutput* self);
@@ -97,6 +109,11 @@ EGLDisplay video_output_get_egl_display(VideoOutput* self);
 EGLContext video_output_get_egl_context(VideoOutput* self);
 
 EGLSurface video_output_get_egl_surface(VideoOutput* self);
+
+gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self);
+
+gboolean video_output_is_using_fallback_egl(VideoOutput* self);
+
 
 guint8* video_output_get_pixel_buffer(VideoOutput* self);
 

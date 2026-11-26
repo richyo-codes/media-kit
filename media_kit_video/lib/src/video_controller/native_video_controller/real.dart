@@ -242,6 +242,20 @@ class NativeVideoController extends PlatformVideoController {
     }
   }
 
+  @override
+  Future<void> notifyTextureMounted() async {
+    if (!Platform.isLinux) {
+      return;
+    }
+    final handle = await player.handle;
+    await _channel.invokeMethod(
+      'VideoOutputManager.MarkFrameAvailable',
+      {
+        'handle': handle.toString(),
+      },
+    );
+  }
+
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
     super.dispose();
