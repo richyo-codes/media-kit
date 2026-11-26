@@ -115,7 +115,9 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self);
 gboolean video_output_is_using_fallback_egl(VideoOutput* self);
 
 
-guint8* video_output_get_pixel_buffer(VideoOutput* self);
+gboolean video_output_copy_pixel_buffer(VideoOutput* self,
+                                        guint8* destination,
+                                        gsize destination_length);
 
 gint64 video_output_get_width(VideoOutput* self);
 
