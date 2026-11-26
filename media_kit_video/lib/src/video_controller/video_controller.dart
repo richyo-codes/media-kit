@@ -156,6 +156,13 @@ class VideoController {
     );
   }
 
+  /// Waits for the native render context when deferred GTK4 startup is enabled.
+  /// The video texture must be mounted before awaiting this future.
+  Future<void> get waitUntilRenderContextReady async {
+    final instance = await platform.future;
+    await instance.waitUntilRenderContextReady;
+  }
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered async {
     final instance = await platform.future;

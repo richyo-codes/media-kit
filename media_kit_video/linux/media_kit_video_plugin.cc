@@ -69,6 +69,11 @@ static void media_kit_video_plugin_handle_method_call(
     configuration_value.enable_hardware_acceleration =
         configuration_enable_hardware_acceleration;
 
+    FlValue* defer_gl_context =
+        fl_value_lookup_string(configuration, "deferLinuxRenderContext");
+    configuration_value.defer_gl_context =
+        defer_gl_context != NULL && fl_value_get_bool(defer_gl_context);
+
     typedef struct _VideoOutputTextureUpdateCallbackData {
       FlMethodChannel* channel;
       gint64 handle;
@@ -80,7 +85,8 @@ static void media_kit_video_plugin_handle_method_call(
     data->handle = handle_value;
     video_output_manager_create(
         self->video_output_manager, handle_value, configuration_value,
-        [](gint64 id, gint64 width, gint64 height, gpointer context) {
+        [](gint64 id, gint64 width, gint64 height, gboolean context_ready,
+           gpointer context) {
           auto data = (VideoOutputTextureUpdateCallbackData*)context;
           FlMethodChannel* channel = data->channel;
           gint64 handle = data->handle;
@@ -93,6 +99,8 @@ static void media_kit_video_plugin_handle_method_call(
           fl_value_set_string_take(result, "handle", fl_value_new_int(handle));
           fl_value_set_string_take(result, "id", fl_value_new_int(id));
           fl_value_set_string_take(result, "rect", rect);
+          fl_value_set_string_take(result, "renderContextReady",
+                                   fl_value_new_bool(context_ready));
           
           typedef struct {
             FlMethodChannel* channel;
@@ -100,7 +108,7 @@ static void media_kit_video_plugin_handle_method_call(
           } IdleCallbackData;
           
           IdleCallbackData* idle_data = g_new0(IdleCallbackData, 1);
-          idle_data->channel = channel;
+          idle_data->channel = FL_METHOD_CHANNEL(g_object_ref(channel));
           idle_data->result = result;
 
           // `fl_method_channel_invoke_method` should be called from PlatformThread.
@@ -108,6 +116,8 @@ static void media_kit_video_plugin_handle_method_call(
             IdleCallbackData* idle_data = (IdleCallbackData*)user_data;
             fl_method_channel_invoke_method(idle_data->channel, "VideoOutput.Resize", 
                                           idle_data->result, NULL, NULL, NULL);
+            g_object_unref(idle_data->channel);
+            fl_value_unref(idle_data->result);
             g_free(idle_data);
             return G_SOURCE_REMOVE;
           }, idle_data);

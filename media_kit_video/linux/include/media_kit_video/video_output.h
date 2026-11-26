@@ -20,6 +20,7 @@ typedef struct _VideoOutputConfiguration {
   gint64 width;
   gint64 height;
   bool enable_hardware_acceleration;
+  bool defer_gl_context = false;
 
   _VideoOutputConfiguration(gint64 width = NULL,
                             gint64 height = NULL,
@@ -33,6 +34,7 @@ typedef struct _VideoOutputConfiguration {
 typedef void (*TextureUpdateCallback)(gint64 id,
                                       gint64 width,
                                       gint64 height,
+                                      gboolean context_ready,
                                       gpointer context);
 
 #define VIDEO_OUTPUT_TYPE (video_output_get_type())

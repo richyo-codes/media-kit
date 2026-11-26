@@ -50,6 +50,15 @@ class NativeVideoController extends PlatformVideoController {
   /// [Lock] used to synchronize [onLoadHooks], [onUnloadHooks] & [subscription].
   final lock = Lock();
 
+  final _renderContextReady = Completer<void>();
+
+  @override
+  Future<void> get waitUntilRenderContextReady async {
+    if (Platform.isLinux && configuration.deferLinuxRenderContext) {
+      await _renderContextReady.future;
+    }
+  }
+
   NativePlayer get platform => player.platform as NativePlayer;
 
   Future<void> setProperty(String key, String value) async {
@@ -188,6 +197,7 @@ class NativeVideoController extends PlatformVideoController {
         'configuration': {
           'width': configuration.width.toString(),
           'height': configuration.height.toString(),
+          'deferLinuxRenderContext': configuration.deferLinuxRenderContext,
           'enableHardwareAcceleration':
               configuration.enableHardwareAcceleration,
         },
@@ -294,6 +304,12 @@ class NativeVideoController extends PlatformVideoController {
                       call.arguments['rect']['height'] * 1.0,
                     );
                     final int id = call.arguments['id'];
+                    final controller = _controllers[handle];
+                    if (call.arguments['renderContextReady'] == true &&
+                        controller != null &&
+                        !controller._renderContextReady.isCompleted) {
+                      controller._renderContextReady.complete();
+                    }
                     _controllers[handle]?.rect.value = rect;
                     _controllers[handle]?.id.value = id;
                     // Notify about the first frame being rendered.

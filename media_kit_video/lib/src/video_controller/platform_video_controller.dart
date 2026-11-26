@@ -54,6 +54,8 @@ abstract class PlatformVideoController {
   /// Notifies the platform that the texture is mounted in the widget tree.
   Future<void> notifyTextureMounted() async {}
 
+  Future<void> get waitUntilRenderContextReady async {}
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
       waitUntilFirstFrameRenderedCompleter.future;
@@ -117,6 +119,11 @@ class VideoControllerConfiguration {
   /// Default: `true`
   final bool enableHardwareAcceleration;
 
+  /// Initialize the GTK4 GL render context when the video texture first paints.
+  /// Mount a Video and await VideoController.waitUntilRenderContextReady
+  /// before opening media when using this option.
+  final bool deferLinuxRenderContext;
+
   /// Whether to attach `android.view.Surface` after video parameters are known.
   ///
   /// Default:
@@ -132,6 +139,7 @@ class VideoControllerConfiguration {
     this.height,
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
+    this.deferLinuxRenderContext = false,
     this.androidAttachSurfaceAfterVideoParameters,
   });
 
@@ -143,6 +151,7 @@ class VideoControllerConfiguration {
     int? width,
     int? height,
     bool? enableHardwareAcceleration,
+    bool? deferLinuxRenderContext,
     bool? androidAttachSurfaceAfterVideoParameters,
   }) =>
       VideoControllerConfiguration(
@@ -153,6 +162,8 @@ class VideoControllerConfiguration {
         height: height ?? this.height,
         enableHardwareAcceleration:
             enableHardwareAcceleration ?? this.enableHardwareAcceleration,
+        deferLinuxRenderContext:
+            deferLinuxRenderContext ?? this.deferLinuxRenderContext,
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,

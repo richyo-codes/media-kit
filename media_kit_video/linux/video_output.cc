@@ -336,6 +336,20 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
   // Causes frame drops with `pulse` audio output. (SlotSun/dart_simple_live#42)
   // mpv_set_option_string(self->handle, "video-timing-offset", "0");
   gboolean hardware_acceleration_supported = FALSE;
+#if defined(FLUTTER_LINUX_GTK4)
+  if (self->configuration.enable_hardware_acceleration &&
+      self->configuration.defer_gl_context) {
+    // Publish a placeholder texture before initializing mpv on the raster
+    // thread. The caller opens media after the shared context is ready.
+    self->texture_gl = texture_gl_new(self);
+    if (fl_texture_registrar_register_texture(
+            texture_registrar, FL_TEXTURE(self->texture_gl))) {
+      return self;
+    }
+    g_clear_object(&self->texture_gl);
+    self->configuration.enable_hardware_acceleration = FALSE;
+  }
+#endif
   if (self->configuration.enable_hardware_acceleration) {
     // Get Flutter's current EGL display (DO NOT share context)
     EGLDisplay flutter_display = eglGetCurrentDisplay();
@@ -523,6 +537,7 @@ void video_output_set_texture_update_callback(
     VideoOutput* self,
     TextureUpdateCallback texture_update_callback,
     gpointer texture_update_callback_context) {
+  ScopedVideoOutputRenderLock lock(self);
   self->texture_update_callback = texture_update_callback;
   self->texture_update_callback_context = texture_update_callback_context;
   // Notify initial dimensions as (1, 1) if |width| & |height| are 0 i.e.
@@ -533,10 +548,11 @@ void video_output_set_texture_update_callback(
   // never ending deadlock where no video frames are ever rendered.
   gint64 texture_id = video_output_get_texture_id(self);
   if (self->width == 0 || self->height == 0) {
-    self->texture_update_callback(texture_id, 1, 1,
+    self->texture_update_callback(texture_id, 1, 1, self->render_context != NULL,
                                   self->texture_update_callback_context);
   } else {
     self->texture_update_callback(texture_id, self->width, self->height,
+                                  self->render_context != NULL,
                                   self->texture_update_callback_context);
   }
 }
@@ -691,6 +707,10 @@ gboolean video_output_rebind_to_flutter_current_context(VideoOutput* self) {
   self->bound_flutter_context = flutter_context;
   eglMakeCurrent(flutter_display, flutter_draw_surface, flutter_read_surface,
                  flutter_context);
+
+  if (!replaced_active_render_context && self->configuration.defer_gl_context) {
+    video_output_notify_texture_update(self);
+  }
 
   if (replaced_active_render_context) {
     // libmpv disables video when an active render context is freed. GTK4 must
@@ -992,6 +1012,7 @@ void video_output_notify_texture_update(VideoOutput* self) {
   gint64 height = video_output_get_height(self);
   gpointer context = self->texture_update_callback_context;
   if (self->texture_update_callback != NULL) {
-    self->texture_update_callback(id, width, height, context);
+    self->texture_update_callback(id, MAX(width, 1), MAX(height, 1),
+                                  self->render_context != NULL, context);
   }
 }

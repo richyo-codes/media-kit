@@ -182,3 +182,13 @@ For GTK4, cover:
 Measure frame time, dropped frames, CPU usage, GPU usage, and resident memory.
 The test should also fail on GLib/GDK criticals, Epoxy assertions, use-after-free
 reports, or callbacks delivered after controller disposal.
+
+### Start playback after GTK4 texture initialization
+
+For a player with a mounted `Video` widget, set
+`VideoControllerConfiguration(deferLinuxRenderContext: true)` and await
+`controller.waitUntilRenderContextReady` before calling `player.open()`.
+The widget paints a hidden placeholder while the GTK4 raster callback creates
+the shared EGL context used by libmpv. Use a timeout if mounting can fail or
+the widget can be removed before startup completes. Keep the default
+configuration for playback that starts before a video widget is mounted.
